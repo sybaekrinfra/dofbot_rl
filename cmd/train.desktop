@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=TRAIN
+Terminal=true
+Type=Application
+Exec=xfce4-terminal --title="TRAIN" --geometry=94x25+0+0 -e "bash -lc \"$HOME/Desktop/train.sh; exec bash\""

@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE=nvcr.io/nvidia/isaac/ros:noble-ros2_jazzy
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    SHELL=/bin/bash \
+    LANG=en_US.UTF-8 \
+    ROS_DISTRO=jazzy \
+    ISAAC_ROS_WS=/workspaces/isaac_ros-dev \
+    RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+    ROS_PYTHON_VERSION=3
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        wget \
+        curl \
+        gnupg2 \
+        lsb-release \
+        libgl1 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=10 \
+        -o Acquire::https::Timeout=120 \
+        ros-${ROS_DISTRO}-isaac-ros-yolov8 \
+        ros-${ROS_DISTRO}-isaac-ros-dnn-image-encoder \
+        ros-${ROS_DISTRO}-isaac-ros-tensor-rt \
+        ros-${ROS_DISTRO}-isaac-ros-examples \
+        ros-${ROS_DISTRO}-vision-msgs \
+        ros-${ROS_DISTRO}-vision-opencv \
+        ros-${ROS_DISTRO}-rmw-fastrtps-cpp \
+        ros-${ROS_DISTRO}-rmw-fastrtps-shared-cpp \
+        ros-${ROS_DISTRO}-rosidl-typesupport-fastrtps-cpp \
+        ros-${ROS_DISTRO}-fastcdr \
+        ros-${ROS_DISTRO}-fastrtps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --break-system-packages -U \
+        colcon-argcomplete \
+        transforms3d
+
+CMD ["/bin/bash"]

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=TensorBoard
+Type=Application
+Exec=xdg-open http://localhost:6006
+Icon=web-browser
+Terminal=false

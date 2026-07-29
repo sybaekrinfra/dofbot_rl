@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=STARTUP
+Terminal=true
+Type=Application
+Exec=xfce4-terminal --title="VISION" --geometry=94x25+0+0 -e "bash -lc \"$HOME/Desktop/startup.sh; exec bash\""

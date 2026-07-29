@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=ORBBEC
+Terminal=true
+Type=Application
+Exec=xfce4-terminal --title="ORBBEC" --geometry=94x25+0-0 -e "bash -c 'export ROS_DOMAIN_ID=32 && source /opt/ros/jazzy/setup.bash && ros2 launch orbbec_camera gemini_330_series.launch.py camera_name:=Orbbec; exec bash'"

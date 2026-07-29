@@ -1,0 +1,15 @@
+version: 2
+
+docker:
+  image:
+    base_image_keys:
+      - isaac_ros
+    additional_image_keys: [dofbot]
+
+  run:
+    container_name: isaac_ros_dev_container
+    entrypoint: /usr/local/bin/scripts/workspace-entrypoint.sh
+    workdir: "/workspaces/isaac_ros-dev"
+    platform: auto
+    use_cached_build_image: false
+

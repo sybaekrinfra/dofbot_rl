@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ISAAC
+Terminal=true
+Type=Application
+Exec=xfce4-terminal --title="ISAAC_LAB" --geometry=94x25+0+0 -e "bash -lc \"$HOME/Desktop/isaaclab.sh; exec bash\""
+Icon=
+Comment=
+Path=
+StartupNotify=false
