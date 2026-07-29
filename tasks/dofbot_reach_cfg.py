@@ -125,7 +125,7 @@ class DofbotReachEnvCfg(DirectRLEnvCfg):
         spawn=make_dofbot_spawn_cfg(),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
+            rot=(0.0, 0.0, 0.0, 1.0),
             joint_pos={
                 ".*": 0.0,
             },
@@ -168,7 +168,7 @@ class DofbotReachEnvCfg(DirectRLEnvCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(0.18, 0.0, 0.22),
-            rot=(1.0, 0.0, 0.0, 0.0),
+            rot=(0.0, 0.0, 0.0, 1.0),
         ),
     )
 
