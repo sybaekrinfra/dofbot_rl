@@ -63,20 +63,37 @@ def run_pick_place_actuator_test(env) -> None:
         )
     print("[JOINT LIMIT] joint1, joint2, joint3, joint4, wrist: -90.0 to +90.0 deg", flush=True)
 
+    driver_limits = unwrapped.robot.data.soft_joint_pos_limits[0, unwrapped._gripper_driver_joint_id]
+    expected_driver_limits = torch.deg2rad(
+        torch.tensor([-57.0, 33.0], device=unwrapped.device)
+    )
+    if not torch.allclose(driver_limits, expected_driver_limits, atol=1.0e-5):
+        raise RuntimeError(
+            f"Finger_Right_01 range must be -57..+33 deg, got {driver_limits.tolist()}"
+        )
+    print("[JOINT LIMIT] Finger_Right_01 driver: -57.0 to +33.0 deg (90.0 deg total)", flush=True)
+
     zeros = torch.zeros((unwrapped.num_envs,), device=unwrapped.device)
     ones = torch.ones_like(zeros)
     unwrapped._task_phase.zero_()
     unwrapped._gripper_command.zero_()
     unwrapped._update_task_phase(zeros, ones, ones, ones, zeros, ones, zeros.bool())
     unwrapped._gripper_command.fill_(0.8)
+    unwrapped._update_task_phase(ones, zeros, ones, ones, zeros, ones, zeros.bool())
+    if not bool(torch.all(unwrapped._task_phase == 1)):
+        raise RuntimeError("A gripper command without measured finger travel advanced the grasp phase")
     unwrapped._update_task_phase(ones, zeros, ones, ones, zeros, ones, ones.bool())
     unwrapped._update_task_phase(
         ones, zeros, ones, ones, ones * (unwrapped.cfg.lift_height + 0.01), ones, ones.bool()
     )
     unwrapped._update_task_phase(ones, zeros, zeros, zeros, ones, ones, ones.bool())
-    if not bool(torch.all(unwrapped._task_phase == 4)):
+    expected_phase = {"reach": 2, "lift": 3, "pick_place": 4}[unwrapped.cfg.curriculum_stage]
+    if not bool(torch.all(unwrapped._task_phase == expected_phase)):
         raise RuntimeError(f"Pick–Place phase transition failed: {unwrapped._task_phase}")
-    print("[PHASE] 0 approach -> 1 grasp -> 2 lift -> 3 transport -> 4 place/release: ok", flush=True)
+    print(
+        f"[PHASE] stage={unwrapped.cfg.curriculum_stage} stops at phase {expected_phase}: ok",
+        flush=True,
+    )
 
     driven_names = [*unwrapped.cfg.arm_joint_names, unwrapped.cfg.wrist_joint_name]
     driven_ids = unwrapped._controlled_joint_ids
@@ -97,6 +114,31 @@ def run_pick_place_actuator_test(env) -> None:
     env.reset()
     right_id = unwrapped._gripper_driver_joint_id
     left_id = unwrapped._gripper_mimic_joint_id
+    joint_pos = unwrapped.robot.data.default_joint_pos.clone()
+    joint_pos[:, unwrapped._arm_joint_ids] = torch.tensor(
+        unwrapped.cfg.initial_arm_positions_rad, device=unwrapped.device
+    )
+    joint_pos[:, unwrapped._wrist_joint_id] = 0.0
+    joint_pos[:, right_id] = unwrapped.cfg.gripper_driver_open_target
+    joint_pos[:, left_id] = unwrapped.cfg.gripper_mimic_open_position
+    joint_vel = torch.zeros_like(joint_pos)
+    unwrapped.robot.write_joint_state_to_sim(joint_pos, joint_vel)
+    unwrapped._joint_targets[:] = joint_pos
+    object_state = unwrapped.object.data.root_state_w.clone()
+    object_state[:, :3] = unwrapped.scene.env_origins + torch.tensor(
+        [0.25, 0.35, 0.20], device=unwrapped.device
+    )
+    object_state[:, 7:] = 0.0
+    unwrapped.object.write_root_pose_to_sim(object_state[:, :7])
+    unwrapped.object.write_root_velocity_to_sim(object_state[:, 7:])
+    open_action = torch.zeros(
+        (unwrapped.num_envs, unwrapped.cfg.action_space), device=unwrapped.device
+    )
+    open_action[:, 5] = -1.0
+    # Refresh Isaac Lab's articulation cache and let the closed-loop linkage
+    # settle in its constraint-consistent open pose before measuring motion.
+    for _ in range(10):
+        env.step(open_action)
     right_before_all = unwrapped.robot.data.joint_pos[:, right_id].clone()
     left_before_all = unwrapped.robot.data.joint_pos[:, left_id].clone()
     fingertip_ids = unwrapped._fingertip_body_ids
@@ -107,7 +149,7 @@ def run_pick_place_actuator_test(env) -> None:
     )
     close_action = torch.zeros((unwrapped.num_envs, unwrapped.cfg.action_space), device=unwrapped.device)
     close_action[:, 5] = 1.0
-    for _ in range(20):
+    for _ in range(60):
         env.step(close_action)
     right_delta_all = unwrapped.robot.data.joint_pos[:, right_id] - right_before_all
     left_delta_all = unwrapped.robot.data.joint_pos[:, left_id] - left_before_all
@@ -120,7 +162,13 @@ def run_pick_place_actuator_test(env) -> None:
     left_delta = float(left_delta_all[0].item())
     gap_before = float(gap_before_all[0].item())
     gap_after = float(gap_after_all[0].item())
-    closing = (right_delta_all > 0.045) & (left_delta_all < -0.045) & (gap_after_all < gap_before_all)
+    required_travel = 0.95 * unwrapped.cfg.gripper_driver_grasp_travel
+    required_gap_reduction = 0.95 * unwrapped.cfg.gripper_gap_grasp_travel
+    closing = (
+        (right_delta_all >= required_travel)
+        & (left_delta_all <= -required_travel)
+        & ((gap_before_all - gap_after_all) >= required_gap_reduction)
+    )
     print(
         f"[ACTUATOR] right-finger driver delta={right_delta:+.5f}, "
         f"left-finger mimic delta={left_delta:+.5f}, "

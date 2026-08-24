@@ -40,6 +40,24 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         self._gripper_mimic_joint_id = self._find_joint_ids(
             (self.cfg.gripper_mimic_joint_name,)
         )[0]
+        self._gripper_driver_lower = torch.deg2rad(
+            torch.tensor(self.cfg.gripper_driver_lower_limit_deg, device=self.device)
+        )
+        self._gripper_driver_upper = torch.deg2rad(
+            torch.tensor(self.cfg.gripper_driver_upper_limit_deg, device=self.device)
+        )
+        if not (
+            self._gripper_driver_lower
+            <= self.cfg.gripper_driver_open_target
+            <= self._gripper_driver_upper
+        ):
+            raise ValueError("gripper_driver_open_target is outside the -57..+33 degree range")
+        if not (
+            self._gripper_driver_lower
+            <= self.cfg.gripper_driver_closed_target
+            <= self._gripper_driver_upper + 1.0e-6
+        ):
+            raise ValueError("gripper_driver_closed_target is outside the -57..+33 degree range")
         self._grasp_body_id = self._find_body_ids((self.cfg.grasp_reference_body_name,))[0]
         self._base_body_id = self._find_body_ids((self.cfg.base_body_name,))[0]
         self._ee_body_id = self._find_body_ids((self.cfg.ee_body_name,))[0]
@@ -69,6 +87,10 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         self._previous_actions = torch.zeros_like(self.actions)
         self._joint_targets = self.robot.data.default_joint_pos.clone()
         self._gripper_command = torch.zeros((self.num_envs,), device=self.device)
+        self._gripper_phase1_start_position = torch.zeros(
+            (self.num_envs,), device=self.device
+        )
+        self._gripper_phase1_start_gap = torch.zeros((self.num_envs,), device=self.device)
         self._goal_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
         self._previous_reach_dist = torch.zeros((self.num_envs,), device=self.device)
         self._previous_goal_dist = torch.zeros((self.num_envs,), device=self.device)
@@ -76,6 +98,9 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         self._previous_phase_distance = torch.zeros((self.num_envs,), device=self.device)
         self._success_hold_count = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self._task_phase = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
+        self._gripper_limit_violation = torch.zeros(
+            (self.num_envs,), dtype=torch.bool, device=self.device
+        )
         self._grasp_point_offset = torch.tensor(
             self.cfg.grasp_point_offset, dtype=torch.float32, device=self.device
         ).unsqueeze(0)
@@ -158,9 +183,11 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             & (grasp_dist < self.cfg.grasp_dwell_tolerance)
             & (self._gripper_command > 0.65)
         )
+        reach_grasp_hold = (self.cfg.curriculum_stage == "reach") & (self._task_phase >= 2)
+        arm_hold = grasp_dwell | reach_grasp_hold
         controlled_targets = self._joint_targets[:, self._controlled_joint_ids]
         arm_delta = self.actions[:, :5] * self._joint_action_scales
-        arm_delta = torch.where(grasp_dwell.unsqueeze(-1), torch.zeros_like(arm_delta), arm_delta)
+        arm_delta = torch.where(arm_hold.unsqueeze(-1), torch.zeros_like(arm_delta), arm_delta)
         controlled_targets = controlled_targets + arm_delta
         self._joint_targets[:, self._controlled_joint_ids] = torch.clamp(
             controlled_targets, self._controlled_lower, self._controlled_upper
@@ -170,6 +197,9 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         controlled_targets = self._joint_targets[:, self._controlled_joint_ids]
         gripper_target = self.cfg.gripper_driver_open_target + self._gripper_command * (
             self.cfg.gripper_driver_closed_target - self.cfg.gripper_driver_open_target
+        )
+        gripper_target = torch.clamp(
+            gripper_target, self._gripper_driver_lower, self._gripper_driver_upper
         )
         self._joint_targets[:, self._gripper_driver_joint_id] = gripper_target
 
@@ -188,6 +218,28 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         body_quat = self.robot.data.body_quat_w.torch[:, self._grasp_body_id]
         offset = self._grasp_point_offset.expand(self.num_envs, -1)
         return body_pos + quat_apply(body_quat, offset)
+
+    def _fingertip_gap(self) -> torch.Tensor:
+        """Return the measured distance between the two physical fingertip bodies."""
+        fingertip_pos = self.robot.data.body_pos_w.torch[:, self._fingertip_body_ids]
+        return torch.linalg.norm(fingertip_pos[:, 0] - fingertip_pos[:, 1], dim=-1)
+
+    def _gripper_physical_close_fraction(self) -> torch.Tensor:
+        """Measure closure from both driver travel and fingertip-gap reduction."""
+        driver_position = self.robot.data.joint_pos[:, self._gripper_driver_joint_id]
+        driver_fraction = torch.clamp(
+            (driver_position - self._gripper_phase1_start_position)
+            / self.cfg.gripper_driver_grasp_travel,
+            0.0,
+            1.0,
+        )
+        gap_fraction = torch.clamp(
+            (self._gripper_phase1_start_gap - self._fingertip_gap())
+            / self.cfg.gripper_gap_grasp_travel,
+            0.0,
+            1.0,
+        )
+        return torch.minimum(driver_fraction, gap_fraction)
 
     def _grasp_approach_axis_w(self) -> torch.Tensor:
         """Return Finger_Right_02 local +Z in world coordinates."""
@@ -254,10 +306,7 @@ class DofbotPickPlaceEnv(DirectRLEnv):
 
     def _success_mask(self) -> torch.Tensor:
         _, _, _, reach_dist, goal_dist, object_height, object_speed = self._task_state()
-        gripper_physically_closed = (
-            self.robot.data.joint_pos[:, self._gripper_driver_joint_id]
-            > self.cfg.gripper_driver_grasp_threshold
-        )
+        gripper_physically_closed = self._gripper_physical_close_fraction() >= 1.0
         if self.cfg.curriculum_stage == "reach":
             return (
                 (self._task_phase >= 2)
@@ -301,8 +350,11 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             (grasp_dist < self.cfg.direct_grasp_entry_tolerance)
             & (vertical_alignment > 0.60)
         )
+        entry_ready = pregrasp_ready
+        if self.cfg.curriculum_stage != "reach":
+            entry_ready = entry_ready | direct_grasp_ready
         next_phase = torch.where(
-            (phase == 0) & (pregrasp_ready | direct_grasp_ready),
+            (phase == 0) & entry_ready,
             torch.ones_like(next_phase),
             next_phase,
         )
@@ -314,18 +366,20 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             torch.full_like(next_phase, 2),
             next_phase,
         )
-        next_phase = torch.where(
-            (phase == 2) & (object_height > self.cfg.lift_height),
-            torch.full_like(next_phase, 3),
-            next_phase,
-        )
-        next_phase = torch.where(
-            (phase == 3)
-            & (goal_xy_dist < self.cfg.transport_tolerance)
-            & (goal_above_dist < 0.075),
-            torch.full_like(next_phase, 4),
-            next_phase,
-        )
+        if self.cfg.curriculum_stage != "reach":
+            next_phase = torch.where(
+                (phase == 2) & (object_height > self.cfg.lift_height),
+                torch.full_like(next_phase, 3),
+                next_phase,
+            )
+        if self.cfg.curriculum_stage == "pick_place":
+            next_phase = torch.where(
+                (phase == 3)
+                & (goal_xy_dist < self.cfg.transport_tolerance)
+                & (goal_above_dist < 0.075),
+                torch.full_like(next_phase, 4),
+                next_phase,
+            )
 
         # If a grasp is lost before transport, retry from the pre-grasp phase.
         lost_grasp = (
@@ -344,18 +398,21 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         grasp_pos, object_pos, goal_pos, reach_dist, goal_dist, object_height, _ = self._task_state()
         close_command = self._gripper_command
         gripper_driver_position = self.robot.data.joint_pos[:, self._gripper_driver_joint_id]
-        close_travel = (
-            self.cfg.gripper_driver_grasp_threshold
-            - self.cfg.gripper_driver_open_target
+        # Capture the physical driver pose at the instant the approach phase ends.
+        # This avoids assuming that the settled open linkage is exactly at 0 rad.
+        self._gripper_phase1_start_position = torch.where(
+            self._task_phase == 0,
+            gripper_driver_position.detach(),
+            self._gripper_phase1_start_position,
         )
-        physical_close_fraction = torch.clamp(
-            (gripper_driver_position - self.cfg.gripper_driver_open_target) / close_travel,
-            0.0,
-            1.0,
+        fingertip_gap = self._fingertip_gap()
+        self._gripper_phase1_start_gap = torch.where(
+            self._task_phase == 0,
+            fingertip_gap.detach(),
+            self._gripper_phase1_start_gap,
         )
-        gripper_physically_closed = (
-            gripper_driver_position > self.cfg.gripper_driver_grasp_threshold
-        )
+        physical_close_fraction = self._gripper_physical_close_fraction()
+        gripper_physically_closed = physical_close_fraction >= 1.0
         vertical_alignment = self._vertical_alignment()
         pregrasp_target = object_pos.clone()
         pregrasp_target[:, 2] += self.cfg.pregrasp_height
@@ -403,28 +460,35 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         )
         close_far = -phase0 * self.cfg.close_far_penalty_scale * close_command
 
-        lift_reward = phase2 * self.cfg.lift_reward_scale * lifted_fraction
-        lift_progress = phase2 * self.cfg.lift_progress_scale * torch.clamp(
+        enable_lift = float(self.cfg.curriculum_stage != "reach")
+        enable_place = float(self.cfg.curriculum_stage == "pick_place")
+        lift_reward = enable_lift * phase2 * self.cfg.lift_reward_scale * lifted_fraction
+        lift_progress = enable_lift * phase2 * self.cfg.lift_progress_scale * torch.clamp(
             object_height - self._previous_object_height, min=-0.01, max=0.01
         )
         grasp_hold_reward = (
             (phase2 + phase3)
+            * self.cfg.grasp_hold_reward_scale
             * physical_close_fraction
             * torch.exp(-reach_dist / 0.055)
         )
         transport_reward = (
-            phase3
+            enable_place
+            * phase3
             * self.cfg.transport_reward_scale
             * torch.exp(-goal_above_dist / 0.08)
         )
-        place_reward = phase4 * self.cfg.place_reward_scale * torch.exp(-goal_dist / 0.040)
+        place_reward = (
+            enable_place * phase4 * self.cfg.place_reward_scale * torch.exp(-goal_dist / 0.040)
+        )
         release_reward = (
-            phase4
+            enable_place
+            * phase4
             * self.cfg.release_reward_scale
             * (goal_dist < self.cfg.place_tolerance).float()
             * (1.0 - close_command)
         )
-        premature_release_penalty = (
+        premature_release_penalty = enable_lift * (
             -self.cfg.premature_release_penalty_scale * (phase2 + phase3) * (1.0 - close_command)
         )
 
@@ -517,6 +581,11 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             + tilt_penalty
             + floor_sweep_penalty
         )
+        reward = torch.where(
+            self._gripper_limit_violation,
+            torch.full_like(reward, -self.cfg.gripper_limit_violation_penalty),
+            reward,
+        )
 
         self._previous_reach_dist = reach_dist.detach()
         self._previous_goal_dist = goal_dist.detach()
@@ -533,8 +602,12 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             "Metrics/lift_rate": lifted.float().mean(),
             "Metrics/success_rate": success.float().mean(),
             "Metrics/gripper_close": close_command.mean(),
-            "Metrics/gripper_driver_position": gripper_driver_position.mean(),
+            "Metrics/gripper_driver_position": torch.clamp(
+                gripper_driver_position, self._gripper_driver_lower, self._gripper_driver_upper
+            ).mean(),
+            "Metrics/fingertip_gap": fingertip_gap.mean(),
             "Metrics/gripper_physical_close": physical_close_fraction.mean(),
+            "Metrics/gripper_limit_violation": self._gripper_limit_violation.float().mean(),
             "Metrics/task_phase": phase.float().mean(),
             "Metrics/vertical_alignment": vertical_alignment.mean(),
             "Metrics/pregrasp_distance": pregrasp_dist.mean(),
@@ -574,8 +647,20 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             self._gripper_center_w()[:, 2] - self._base_pos_w()[:, 2] - self.cfg.table_top_z
         )
         floor_collision = grasp_clearance < self.cfg.floor_collision_clearance
+        gripper_driver_position = self.robot.data.joint_pos[:, self._gripper_driver_joint_id]
+        self._gripper_limit_violation = (
+            ~torch.isfinite(gripper_driver_position)
+            | (
+                gripper_driver_position
+                < self._gripper_driver_lower - self.cfg.gripper_limit_tolerance_rad
+            )
+            | (
+                gripper_driver_position
+                > self._gripper_driver_upper + self.cfg.gripper_limit_tolerance_rad
+            )
+        )
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        return success | fallen | floor_collision, time_out
+        return success | fallen | floor_collision | self._gripper_limit_violation, time_out
 
     def _sample_object_and_goal(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         count = len(env_ids)
@@ -671,8 +756,11 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         self.actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self._gripper_command[env_ids] = 0.0
+        self._gripper_phase1_start_position[env_ids] = self.cfg.gripper_driver_open_target
+        self._gripper_phase1_start_gap[env_ids] = 0.0
         self._success_hold_count[env_ids] = 0
         self._task_phase[env_ids] = 0
+        self._gripper_limit_violation[env_ids] = False
         gripper_pos = self._gripper_center_w()[env_ids]
         reach_dist = torch.linalg.norm(object_state[:, :3] - gripper_pos, dim=-1)
         goal_dist = torch.linalg.norm(goal_state[:, :3] - object_state[:, :3], dim=-1)

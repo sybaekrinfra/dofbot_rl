@@ -90,10 +90,19 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     # enough clearance for the 25 mm training cube.  Resetting only the two base
     # finger joints to +/-0.7 twists the closed-loop linkage and destabilizes PhysX.
     gripper_driver_open_target: float = 0.0
-    gripper_driver_closed_target: float = 0.55
+    # Finger_Right_01_RevoluteJoint has exactly 90 degrees of travel: -57..+33.
+    gripper_driver_lower_limit_deg: float = -57.0
+    gripper_driver_upper_limit_deg: float = 33.0
+    # Stay safely inside the +33 degree hard stop to avoid solver overshoot/chatter.
+    gripper_driver_closed_target: float = 0.50
     # Phase 1 may finish only after the simulated driver has physically moved
-    # away from its open pose.  A command alone is not evidence of a grasp.
-    gripper_driver_grasp_threshold: float = 0.05
+    # this far from its measured phase-entry pose. A command alone is not a grasp.
+    # Contact with the 25 mm cube can stop travel early, so both this driver
+    # displacement and a measured fingertip-gap reduction are required.
+    gripper_driver_grasp_travel: float = 0.003
+    gripper_gap_grasp_travel: float = 0.0001
+    gripper_limit_tolerance_rad: float = 0.02
+    gripper_limit_violation_penalty: float = 25.0
     # Used only to initialize the PhysX mimic pair in a constraint-consistent pose.
     gripper_mimic_open_position: float = 0.0
 
@@ -114,7 +123,7 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     transport_clearance: float = 0.080
     pregrasp_tolerance: float = 0.050
     grasp_tolerance: float = 0.030
-    grasp_dwell_tolerance: float = 0.040
+    grasp_dwell_tolerance: float = 0.032
     direct_grasp_entry_tolerance: float = 0.090
     transport_tolerance: float = 0.050
     vertical_alignment_threshold: float = 0.70
@@ -125,6 +134,7 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     close_near_object_scale: float = 4.0
     close_far_penalty_scale: float = 1.0
     grasp_phase_bonus_scale: float = 10.0
+    grasp_hold_reward_scale: float = 1.0
     lift_reward_scale: float = 8.0
     lift_progress_scale: float = 80.0
     transport_reward_scale: float = 6.0
@@ -182,7 +192,7 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
                 # overcome the closed-loop linkage while the zero-pose reset keeps
                 # the mimic constraints consistent in batched rollouts.
                 stiffness=1000.0,
-                damping=10.0,
+                damping=50.0,
             ),
         },
     )
@@ -279,6 +289,8 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
 class DofbotPickPlaceReachEnvCfg(DofbotPickPlaceEnvCfg):
     curriculum_stage: str = "reach"
     episode_length_s: float = 4.0
+    # Reach teaches the complete grasp prerequisite, but no lifting yet.
+    grasp_hold_reward_scale: float = 5.0
 
 
 @configclass
