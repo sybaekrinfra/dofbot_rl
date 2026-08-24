@@ -69,7 +69,10 @@ ros2 run bottle_position bottle_position_node --ros-args -p target_frame:=Orbbec
 source /opt/ros/jazzy/setup.bash
 ros2 run rqt_image_view rqt_image_view /yolov8_processed_image
 ' C-m
-
+git -C "$HOME/dofbot_rl" remote get-url origin
+git -C "$HOME/dofbot_rl" status --short
+git -C "$HOME/dofbot_rl" rev-parse HEAD
+git -C "$HOME/dofbot_rl" describe --tags --always
     # 8: tensorboard
     tmux new-window -t $SESSION -n tensorboard
     tmux send-keys -t $SESSION:8 "
