@@ -87,6 +87,75 @@ CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_reach_ik_direct_refine/<run>/
 이 스크립트는 Isaac Sim 6.0.1의 `isaacsim.ros2.core/jazzy`(Python 3.12)를 우선 사용하고,
 없을 때 `/opt/ros/jazzy`를 사용합니다. `ROS_DOMAIN_ID` 기본값은 `32`입니다.
 
+## DOFBOT_V2 Pick–Place 학습
+
+`assets/dofbot_v2/dofbot.usd`의 4축 arm, wrist, 물리 그리퍼를 사용하는 Direct-RL 환경이 포함되어 있습니다.
+정책 action은 `joint1~joint4 + Wrist_Twist`의 position delta 5개와 오른쪽 손가락 명령 1개로 총
+6차원입니다. 왼쪽 1번 손가락은 USD의 PhysX mimic 관계를 그대로 사용하므로 직접 명령하지 않습니다.
+정책 관측은 53차원이며 `reach → lift → pick_place` 순서로 체크포인트를 이어받습니다.
+
+실제 grasp 기준점은 `Finger_Right_02` Xform의 로컬 좌표
+`(0.00004, 0.020316, 0.019236) m`를 world 좌표로 변환해서 사용합니다. 정책은 단순히 물체와
+목표점 사이 거리만 줄이지 않고 아래 5단계 one-hot 상태를 관측합니다.
+
+1. 열린 그리퍼를 물체 위 `0.08 m` pre-grasp 위치로 이동하고 지면 법선에 수직 정렬
+2. 보정된 grasp point를 물체에 내린 뒤 그리퍼 닫기
+3. 물체의 자세를 유지하며 부드럽게 들어 올리기
+4. 물체를 목표점 위 `0.08 m` 위치로 운반
+5. 목표점으로 내린 뒤 그리퍼 열기
+
+운반 중에는 action 변화량, 물체 각속도와 기울기에 penalty가 적용됩니다. 물체의 up-axis와
+각속도, 그리퍼 접근축 및 현재 단계를 포함하므로 최종 정책 관측은 53차원입니다.
+
+리셋 시 팔은 singularity를 피한 `(joint2, joint3, joint4)=(-0.85, -1.10, -0.40) rad` 자세로
+시작하고, `joint1=-atan2(cube_x, cube_y)`로 설정되어 샘플된 첫 큐브를 향합니다. joint2의 action
+scale은 작게 유지하며, joint3는 측정 기반 초기값과 posture penalty로 화면상 반대방향 굽힘을
+유도합니다. 측정 기반 초기값과 약한 posture penalty로 같은 성과라면 joint2를 과도하게
+접는 대신 joint3·joint4를 활용하도록 유도합니다. 이 6-action/53-observation 환경은
+이전 4-action/35-observation 모델 및 중간 6-action/39-observation 모델과 호환되지 않으므로
+기존 Pick–Place 모델을 resume하지 말고 Reach 단계부터 새로 학습해야 합니다.
+
+joint1부터 joint4 및 Wrist까지 정책 target 범위는 실제 사양과 동일하게 모두 `-90°~+90°`입니다.
+긴 말단 링크가 테이블을 훑는 것을 막기 위해 joint2에는 낮은 action scale과 별도 action/posture
+penalty가 적용되며, 부족한 reach는 joint3·joint4가 담당합니다. 또한 단계마다 보정 grasp point의
+최소 테이블 여유 높이를 검사하고, 낮게 훑으면 penalty를 주며 테이블 높이 아래로 침범하면 해당
+episode를 즉시 종료합니다.
+
+모든 task 좌표는 DOFBOT의 `base_link=(0, 0, 0)` 기준입니다. 로봇은 identity quaternion
+`(x, y, z, w)=(0, 0, 0, 1)`로 배치되고, object와 goal 위치 및 정책 관측도 실제 `base_link`
+world position을 빼서 계산합니다. 스모크 테스트는 base 오차가 `1e-5 m`를 넘으면 실패합니다.
+
+먼저 환경을 짧게 검사합니다.
+
+```bash
+cd "$HOME/IsaacLab"
+./isaaclab.sh -p "$HOME/dofbot_rl/smoke_test.py" \
+  --task Dofbot-V2-PickPlace-Direct-v0 \
+  --num_envs 4 --num_steps 20 --actuator_test --device cuda:0 --viz none
+```
+
+학습은 아래 순서대로 실행합니다. `lift`는 최신 `*_reach` run을, `pick_place`는 최신 `*_lift` run을
+자동으로 찾아 이어서 학습합니다.
+
+```bash
+cd "$HOME/dofbot_rl"
+
+STAGE=reach NUM_ENVS=64 MAX_ITERATIONS=1000 bash cmd/train_pick_place.sh
+STAGE=lift NUM_ENVS=64 MAX_ITERATIONS=2000 bash cmd/train_pick_place.sh
+STAGE=pick_place NUM_ENVS=64 MAX_ITERATIONS=4000 bash cmd/train_pick_place.sh
+```
+
+중간 단계부터 새로 학습하려면 `RESUME=0`을 추가합니다. 특정 run을 이어받으려면
+`LOAD_RUN=2026-..._reach`와 `CHECKPOINT_PATTERN=model_.*.pt`를 지정합니다.
+
+최종 정책을 GUI에서 재생합니다.
+
+```bash
+cd "$HOME/dofbot_rl"
+CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_v2_pick_place/<run>/<model>.pt" \
+  bash cmd/play_pick_place.sh
+```
+
 ## 관측 / 행동 / 보상
 
 ### 관측

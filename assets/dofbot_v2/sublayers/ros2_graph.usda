@@ -1,0 +1,770 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Front = {
+                double3 position = (5, 0, 0)
+                double radius = 5
+            }
+            dictionary Perspective = {
+                double3 position = (0.691289634911422, 0.6209364326520894, 0.5709172046522357)
+                double3 target = (-0.10140451726245003, -0.21704470755279848, 0.1867442773834438)
+            }
+            dictionary Right = {
+                double3 position = (0, -5, 0)
+                double radius = 5
+            }
+            dictionary Top = {
+                double3 position = (0, 0, 5)
+                double radius = 5
+            }
+            string boundCamera = "/OmniverseKit_Persp"
+        }
+        dictionary omni_layer = {
+            string authoring_layer = "./dofbot.usd"
+            dictionary locked = {
+            }
+            dictionary muteness = {
+            }
+        }
+        dictionary renderSettings = {
+        }
+    }
+    defaultPrim = "World"
+    endTimeCode = 1000000
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 60
+    upAxis = "Z"
+)
+
+over "World"
+{
+    def OmniGraph "Read_isaacdofbot_jointcontrol" (
+        active = true
+    )
+    {
+        token evaluationMode = "Automatic"
+        token evaluator:type = "execution"
+        token fabricCacheBacking = "StageWithoutHistory"
+        int2 fileFormatVersion = (1, 9)
+        token pipelineStage = "pipelineStageSimulation"
+
+        def OmniGraphNode "on_playback_tick" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            token node:type = "omni.graph.action.OnPlaybackTick"
+            int node:typeVersion = 2
+            custom double outputs:deltaSeconds
+            custom double outputs:frame
+            custom uint outputs:tick (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom double outputs:time
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (-5.6652613, 108.06138)
+        }
+
+        def OmniGraphNode "ros2_context" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uchar inputs:domain_id = 32
+            custom bool inputs:useDomainIDEnvVar = 0
+            token node:type = "isaacsim.ros2.bridge.ROS2Context"
+            int node:typeVersion = 2
+            custom uint64 outputs:context
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (-4.512101, 264.8829)
+        }
+
+        def OmniGraphNode "ros2_subscribe_joint_state" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint64 inputs:context
+            prepend uint64 inputs:context.connect = </World/Read_isaacdofbot_jointcontrol/ros2_context.outputs:context>
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </World/Read_isaacdofbot_jointcontrol/on_playback_tick.outputs:tick>
+            custom string inputs:nodeNamespace = "/isaac_dofbot"
+            custom string inputs:qosProfile
+            custom uint64 inputs:queueSize
+            custom string inputs:topicName = "/joint_command"
+            token node:type = "isaacsim.ros2.bridge.ROS2SubscribeJointState"
+            int node:typeVersion = 2
+            custom double[] outputs:effortCommand
+            custom uint outputs:execOut (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom token[] outputs:jointNames
+            custom double[] outputs:positionCommand
+            custom double outputs:timeStamp
+            custom double[] outputs:velocityCommand
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (221.58966, 190.46034)
+        }
+
+        def OmniGraphNode "articulation_controller" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double[] inputs:effortCommand
+            prepend double[] inputs:effortCommand.connect = </World/Read_isaacdofbot_jointcontrol/ros2_subscribe_joint_state.outputs:effortCommand>
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </World/Read_isaacdofbot_jointcontrol/ros2_subscribe_joint_state.outputs:execOut>
+            custom int[] inputs:jointIndices
+            custom token[] inputs:jointNames
+            prepend token[] inputs:jointNames.connect = </World/Read_isaacdofbot_jointcontrol/ros2_subscribe_joint_state.outputs:jointNames>
+            custom double[] inputs:positionCommand
+            prepend double[] inputs:positionCommand.connect = </World/Read_isaacdofbot_jointcontrol/ros2_subscribe_joint_state.outputs:positionCommand>
+            custom string inputs:robotPath
+            custom rel inputs:targetPrim = </World/dofbot> (
+                customData = {
+                    dictionary omni = {
+                        dictionary graph = {
+                            string relType = "target"
+                        }
+                    }
+                }
+            )
+            custom double[] inputs:velocityCommand
+            prepend double[] inputs:velocityCommand.connect = </World/Read_isaacdofbot_jointcontrol/ros2_subscribe_joint_state.outputs:velocityCommand>
+            token node:type = "isaacsim.core.nodes.IsaacArticulationController"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (540.2129, 133.12177)
+        }
+    }
+
+    def OmniGraph "Publish_Isaacdofbot_joint_states" (
+        active = true
+    )
+    {
+        token evaluationMode = "Automatic"
+        token evaluator:type = "execution"
+        token fabricCacheBacking = "StageWithoutHistory"
+        int2 fileFormatVersion = (1, 9)
+        token pipelineStage = "pipelineStageSimulation"
+
+        def OmniGraphNode "on_playback_tick" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            token node:type = "omni.graph.action.OnPlaybackTick"
+            int node:typeVersion = 2
+            custom double outputs:deltaSeconds
+            custom double outputs:frame
+            custom uint outputs:tick (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom double outputs:time
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (19.07001, 258.59012)
+        }
+
+        def OmniGraphNode "ros2_context" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uchar inputs:domain_id = 32
+            custom bool inputs:useDomainIDEnvVar
+            token node:type = "isaacsim.ros2.bridge.ROS2Context"
+            int node:typeVersion = 2
+            custom uint64 outputs:context
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (303.91388, 204.70137)
+        }
+
+        def OmniGraphNode "ros2_publish_joint_state" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint64 inputs:context
+            prepend uint64 inputs:context.connect = </World/Publish_Isaacdofbot_joint_states/ros2_context.outputs:context>
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:execOut>
+            custom uchar[] inputs:jointDofTypes
+            prepend uchar[] inputs:jointDofTypes.connect = </World/Publish_Isaacdofbot_joint_states/resize_array.outputs:array>
+            custom double[] inputs:jointEfforts
+            prepend double[] inputs:jointEfforts.connect = [
+                </World/Publish_Isaacdofbot_joint_states/articulation_state.outputs:measuredJointEfforts>,
+                </World/Publish_Isaacdofbot_joint_states/resize_array_01.outputs:array>,
+            ]
+            custom token[] inputs:jointNames = []
+            prepend token[] inputs:jointNames.connect = [
+                </World/Publish_Isaacdofbot_joint_states/articulation_state.outputs:jointNames>,
+                </World/Publish_Isaacdofbot_joint_states/resize_array_02.outputs:array>,
+            ]
+            custom double[] inputs:jointPositions
+            prepend double[] inputs:jointPositions.connect = [
+                </World/Publish_Isaacdofbot_joint_states/articulation_state.outputs:jointPositions>,
+                </World/Publish_Isaacdofbot_joint_states/resize_array_03.outputs:array>,
+            ]
+            custom double[] inputs:jointVelocities
+            prepend double[] inputs:jointVelocities.connect = [
+                </World/Publish_Isaacdofbot_joint_states/articulation_state.outputs:jointVelocities>,
+                </World/Publish_Isaacdofbot_joint_states/resize_array_04.outputs:array>,
+            ]
+            custom string inputs:nodeNamespace = "isaac_dofbot"
+            custom string inputs:qosProfile
+            custom uint64 inputs:queueSize
+            custom float inputs:sensorTime
+            prepend float inputs:sensorTime.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:sensorTime>
+            custom float inputs:stageMetersPerUnit
+            prepend float inputs:stageMetersPerUnit.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:stageMetersPerUnit>
+            custom rel inputs:targetPrim = None (
+                customData = {
+                    dictionary omni = {
+                        dictionary graph = {
+                            string relType = "target"
+                        }
+                    }
+                }
+            )
+            custom double inputs:timeStamp
+            custom string inputs:topicName
+            token node:type = "isaacsim.ros2.bridge.ROS2PublishJointState"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (849.59424, 164.89032)
+        }
+
+        def OmniGraphNode "isaac_read_joint_state_node" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </World/Publish_Isaacdofbot_joint_states/on_playback_tick.outputs:tick>
+            custom rel inputs:prim = </World/dofbot> (
+                customData = {
+                    dictionary omni = {
+                        dictionary graph = {
+                            string relType = "target"
+                        }
+                    }
+                }
+            )
+            token node:type = "isaacsim.sensors.physics.IsaacReadJointState"
+            int node:typeVersion = 1
+            custom uint outputs:execOut (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom uchar[] outputs:jointDofTypes
+            custom double[] outputs:jointEfforts
+            custom token[] outputs:jointNames
+            custom double[] outputs:jointPositions
+            custom double[] outputs:jointVelocities
+            custom float outputs:sensorTime
+            custom float outputs:stageMetersPerUnit
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (269.05316, 341.21765)
+        }
+
+        def OmniGraphNode "resize_array" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:array
+            prepend token inputs:array.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:jointDofTypes>
+            custom int inputs:newSize = 5
+            token node:type = "omni.graph.nodes.ArrayResize"
+            int node:typeVersion = 1
+            custom token outputs:array
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (539.2612, 138.54211)
+        }
+
+        def OmniGraphNode "resize_array_01" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:array
+            prepend token inputs:array.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:jointEfforts>
+            custom int inputs:newSize = 5
+            token node:type = "omni.graph.nodes.ArrayResize"
+            int node:typeVersion = 1
+            custom token outputs:array
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (560.87933, 293.45065)
+        }
+
+        def OmniGraphNode "resize_array_02" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:array
+            prepend token inputs:array.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:jointNames>
+            custom int inputs:newSize = 5
+            token node:type = "omni.graph.nodes.ArrayResize"
+            int node:typeVersion = 1
+            custom token outputs:array
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (558.7607, 429.8159)
+        }
+
+        def OmniGraphNode "resize_array_03" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:array
+            prepend token inputs:array.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:jointPositions>
+            custom int inputs:newSize = 5
+            token node:type = "omni.graph.nodes.ArrayResize"
+            int node:typeVersion = 1
+            custom token outputs:array
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (558.1045, 556.4414)
+        }
+
+        def OmniGraphNode "resize_array_04" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:array
+            prepend token inputs:array.connect = </World/Publish_Isaacdofbot_joint_states/isaac_read_joint_state_node.outputs:jointVelocities>
+            custom int inputs:newSize = 5
+            token node:type = "omni.graph.nodes.ArrayResize"
+            int node:typeVersion = 1
+            custom token outputs:array
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (555.5409, 679.038)
+        }
+    }
+
+    def OmniGraph "publish_Isaacdofbot_gripper_state" (
+        active = true
+    )
+    {
+        token evaluationMode = "Automatic"
+        token evaluator:type = "execution"
+        token fabricCacheBacking = "StageWithoutHistory"
+        int2 fileFormatVersion = (1, 9)
+        token pipelineStage = "pipelineStageSimulation"
+
+        def OmniGraphNode "on_playback_tick" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            token node:type = "omni.graph.action.OnPlaybackTick"
+            int node:typeVersion = 2
+            custom double outputs:deltaSeconds
+            custom double outputs:frame
+            custom uint outputs:tick (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom double outputs:time
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1066.9448, 365.32455)
+        }
+
+        def OmniGraphNode "articulation_state" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </World/publish_Isaacdofbot_gripper_state/on_playback_tick.outputs:tick>
+            custom int[] inputs:jointIndices
+            custom token[] inputs:jointNames = ["Finger_Right_01_RevoluteJoint"]
+            custom string inputs:robotPath
+            custom rel inputs:targetPrim = </World/dofbot> (
+                customData = {
+                    dictionary omni = {
+                        dictionary graph = {
+                            string relType = "target"
+                        }
+                    }
+                }
+            )
+            token node:type = "isaacsim.core.nodes.IsaacArticulationState"
+            int node:typeVersion = 1
+            custom token[] outputs:jointNames
+            custom double[] outputs:jointPositions
+            custom double[] outputs:jointVelocities
+            custom double[] outputs:measuredJointEfforts
+            custom double3[] outputs:measuredJointForces
+            custom double3[] outputs:measuredJointTorques
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1289.3909, 553.7253)
+        }
+
+        def OmniGraphNode "ros2_context" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uchar inputs:domain_id = 32
+            custom bool inputs:useDomainIDEnvVar = 0
+            token node:type = "isaacsim.ros2.bridge.ROS2Context"
+            int node:typeVersion = 2
+            custom uint64 outputs:context
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1306.6465, 293.58044)
+        }
+
+        def OmniGraphNode "ros2_publisher" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint64 inputs:context
+            prepend uint64 inputs:context.connect = </World/publish_Isaacdofbot_gripper_state/ros2_context.outputs:context>
+            custom double inputs:data
+            prepend double inputs:data.connect = </World/publish_Isaacdofbot_gripper_state/get_array_index.outputs:value>
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </World/publish_Isaacdofbot_gripper_state/on_playback_tick.outputs:tick>
+            custom string inputs:messageName = "Float64"
+            custom string inputs:messagePackage = "std_msgs"
+            custom string inputs:messageSubfolder
+            custom string inputs:nodeNamespace = "/isaac_dofbot"
+            custom string inputs:qosProfile
+            custom uint64 inputs:queueSize
+            custom string inputs:topicName = "/gripper_state"
+            token node:type = "isaacsim.ros2.bridge.ROS2Publisher"
+            int node:typeVersion = 1
+            custom uint outputs:execOut (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (2218.8652, 315.3716)
+        }
+
+        def OmniGraphNode "constant_double" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double inputs:value = 0.5759586532
+            token node:type = "omni.graph.nodes.ConstantDouble"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "minimized"
+            uniform float2 ui:nodegraph:node:pos = (1310.1893, 449.10632)
+        }
+
+        def OmniGraphNode "subtract" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:a
+            prepend token inputs:a.connect = </World/publish_Isaacdofbot_gripper_state/constant_double.inputs:value>
+            custom token inputs:b
+            prepend token inputs:b.connect = </World/publish_Isaacdofbot_gripper_state/articulation_state.outputs:jointPositions>
+            token node:type = "omni.graph.nodes.Subtract"
+            int node:typeVersion = 2
+            custom token outputs:difference
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1551.6084, 466.0791)
+        }
+
+        def OmniGraphNode "divide" (
+            active = true
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:a
+            prepend token inputs:a.connect = </World/publish_Isaacdofbot_gripper_state/subtract.outputs:difference>
+            custom token inputs:b
+            prepend token inputs:b.connect = </World/publish_Isaacdofbot_gripper_state/constant_double_01.inputs:value>
+            token node:type = "omni.graph.nodes.Divide"
+            int node:typeVersion = 1
+            custom token outputs:result
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1786.6936, 534.25024)
+        }
+
+        def OmniGraphNode "constant_double_01" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double inputs:value = 1.5707963268
+            token node:type = "omni.graph.nodes.ConstantDouble"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1557.7172, 644.5098)
+        }
+
+        def OmniGraphNode "get_array_index" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:array
+            prepend token inputs:array.connect = </World/publish_Isaacdofbot_gripper_state/divide.outputs:result>
+            custom int inputs:index
+            token node:type = "omni.graph.nodes.ArrayIndex"
+            int node:typeVersion = 1
+            custom token outputs:value
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (2006.0873, 440.83823)
+        }
+    }
+
+    def OmniGraph "Read_isaacdofbot_gripper_control" (
+        active = true
+    )
+    {
+        token evaluationMode = "Automatic"
+        token evaluator:type = "execution"
+        token fabricCacheBacking = "Shared"
+        int2 fileFormatVersion = (1, 9)
+        token pipelineStage = "pipelineStageSimulation"
+
+        def OmniGraphNode "on_playback_tick" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            token node:type = "omni.graph.action.OnPlaybackTick"
+            int node:typeVersion = 2
+            custom double outputs:deltaSeconds
+            custom double outputs:frame
+            custom uint outputs:tick (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom double outputs:time
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (744.7319, 79.67229)
+        }
+
+        def OmniGraphNode "ros2_context" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uchar inputs:domain_id = 32
+            custom bool inputs:useDomainIDEnvVar = 0
+            token node:type = "isaacsim.ros2.bridge.ROS2Context"
+            int node:typeVersion = 2
+            custom uint64 outputs:context
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (746.7138, 249.1345)
+        }
+
+        def OmniGraphNode "articulation_controller" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double[] inputs:effortCommand
+            prepend double[] inputs:effortCommand.connect = </World/Read_isaacdofbot_gripper_control/ros2_subscribe_joint_state.outputs:effortCommand>
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = [
+                </World/Read_isaacdofbot_gripper_control/ros2_subscribe_joint_state.outputs:execOut>,
+                </World/Read_isaacdofbot_gripper_control/ros2_subscriber.outputs:execOut>,
+            ]
+            custom int[] inputs:jointIndices
+            custom token[] inputs:jointNames = ["Finger_Right_01_RevoluteJoint"]
+            custom double[] inputs:positionCommand
+            prepend double[] inputs:positionCommand.connect = </World/Read_isaacdofbot_gripper_control/make_array.outputs:array>
+            custom string inputs:robotPath
+            custom rel inputs:targetPrim = </World/dofbot> (
+                customData = {
+                    dictionary omni = {
+                        dictionary graph = {
+                            string relType = "target"
+                        }
+                    }
+                }
+            )
+            custom double[] inputs:velocityCommand
+            prepend double[] inputs:velocityCommand.connect = </World/Read_isaacdofbot_gripper_control/ros2_subscribe_joint_state.outputs:velocityCommand>
+            token node:type = "isaacsim.core.nodes.IsaacArticulationController"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1930.9473, 67.73456)
+        }
+
+        def OmniGraphNode "make_array" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom int inputs:arraySize
+            custom token inputs:arrayType (
+                allowedTokens = ["auto", "bool[]", "double[]", "float[]", "half[]", "int[]", "int64[]", "token[]", "uchar[]", "uint[]", "uint64[]", "double[2][]", "double[3][]", "double[4][]", "matrixd[2][]", "matrixd[3][]", "matrixd[4][]", "float[2][]", "float[3][]", "float[4][]", "half[2][]", "half[3][]", "half[4][]", "int[2][]", "int[3][]", "int[4][]", "timecode[]", "frame[4][]", "colord[3][]", "colorf[3][]", "colorh[3][]", "colord[4][]", "colorf[4][]", "colorh[4][]", "normald[3][]", "normalf[3][]", "normalh[3][]", "pointd[3][]", "pointf[3][]", "pointh[3][]", "quatd[4][]", "quatf[4][]", "quath[4][]", "texcoordd[2][]", "texcoordf[2][]", "texcoordh[2][]", "texcoordd[3][]", "texcoordf[3][]", "texcoordh[3][]", "vectord[3][]", "vectorf[3][]", "vectorh[3][]"]
+            )
+            custom token inputs:input0
+            delete token inputs:input0.connect = </World/Read_isaacdofbot_gripper_control/multiply_01.outputs:product>
+            prepend token inputs:input0.connect = </World/Read_isaacdofbot_gripper_control/multiply_01.outputs:product>
+            token node:type = "omni.graph.nodes.ConstructArray"
+            int node:typeVersion = 1
+            custom token outputs:array
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1705.8986, 313.3538)
+        }
+
+        def OmniGraphNode "constant_double" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double inputs:value = 33
+            token node:type = "omni.graph.nodes.ConstantDouble"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1237.0881, 69.81389)
+        }
+
+        def OmniGraphNode "constant_double_01" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double inputs:value = 90
+            token node:type = "omni.graph.nodes.ConstantDouble"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1011.37177, -42.01177)
+        }
+
+        def OmniGraphNode "multiply" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:a
+            prepend token inputs:a.connect = </World/Read_isaacdofbot_gripper_control/constant_double_01.inputs:value>
+            custom token inputs:b
+            prepend token inputs:b.connect = [
+                </World/Read_isaacdofbot_gripper_control/get_array_index_01.outputs:value>,
+                </World/Read_isaacdofbot_gripper_control/ros2_subscriber.outputs:data>,
+            ]
+            token node:type = "omni.graph.nodes.Multiply"
+            int node:typeVersion = 2
+            custom token outputs:product
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1236.1189, 168.22955)
+        }
+
+        def OmniGraphNode "subtract" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:a
+            prepend token inputs:a.connect = </World/Read_isaacdofbot_gripper_control/constant_double.inputs:value>
+            custom token inputs:b
+            prepend token inputs:b.connect = </World/Read_isaacdofbot_gripper_control/multiply.outputs:product>
+            token node:type = "omni.graph.nodes.Subtract"
+            int node:typeVersion = 2
+            custom token outputs:difference
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1472.2097, 158.81741)
+        }
+
+        def OmniGraphNode "constant_pi" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double inputs:factor = 1
+            token node:type = "omni.graph.nodes.ConstantPi"
+            int node:typeVersion = 1
+            custom double outputs:value
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1230.0029, 315.60422)
+        }
+
+        def OmniGraphNode "divide" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:a
+            prepend token inputs:a.connect = </World/Read_isaacdofbot_gripper_control/constant_pi.outputs:value>
+            custom token inputs:b
+            prepend token inputs:b.connect = </World/Read_isaacdofbot_gripper_control/constant_double_02.inputs:value>
+            token node:type = "omni.graph.nodes.Divide"
+            int node:typeVersion = 1
+            custom token outputs:result
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1466.1755, 329.24246)
+        }
+
+        def OmniGraphNode "constant_double_02" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double inputs:value = 180
+            token node:type = "omni.graph.nodes.ConstantDouble"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1234.1003, 441.67676)
+        }
+
+        def OmniGraphNode "multiply_01" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom token inputs:a
+            prepend token inputs:a.connect = </World/Read_isaacdofbot_gripper_control/subtract.outputs:difference>
+            custom token inputs:b
+            prepend token inputs:b.connect = </World/Read_isaacdofbot_gripper_control/divide.outputs:result>
+            token node:type = "omni.graph.nodes.Multiply"
+            int node:typeVersion = 2
+            custom token outputs:product
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (1696.4346, 158.78098)
+        }
+
+        def OmniGraphNode "ros2_subscriber" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint64 inputs:context
+            prepend uint64 inputs:context.connect = </World/Read_isaacdofbot_gripper_control/ros2_context.outputs:context>
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </World/Read_isaacdofbot_gripper_control/on_playback_tick.outputs:tick>
+            custom string inputs:messageName = "Float64"
+            custom string inputs:messagePackage = "std_msgs"
+            custom string inputs:messageSubfolder
+            custom string inputs:nodeNamespace
+            custom string inputs:qosProfile
+            custom uint64 inputs:queueSize
+            custom string inputs:topicName = "/isaac_dofbot/gripper_control"
+            token node:type = "isaacsim.ros2.bridge.ROS2Subscriber"
+            int node:typeVersion = 1
+            custom double outputs:data
+            custom uint outputs:execOut (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (981.34216, 78.67698)
+        }
+    }
+}
+
