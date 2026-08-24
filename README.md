@@ -70,10 +70,22 @@ NUM_ENVS=64 MAX_ITERATIONS=2000 bash cmd/train.sh
 cd "$HOME/IsaacLab"
 ./isaaclab.sh -p "$HOME/dofbot_rl/play_rsl_rl.py" \
   --task Dofbot-Reach-IK-Direct-v0 \
-  --checkpoint logs/rsl_rl/dofbot_reach_ik_direct_refine/<run>/model_999.pt
+  --checkpoint logs/rsl_rl/dofbot_reach_ik_direct_refine/<run>/model_999.pt \
+  --viz kit
 ```
 
 `--checkpoint`를 지정하지 않으면 `play_rsl_rl.py`가 해당 task의 최신 `model_*.pt`를 자동으로 찾습니다.
+일반 play에서는 ROS 2를 불러오지 않습니다. ROS 2 Jazzy target 입력과 joint/gripper 출력을 함께 사용하려면
+체크포인트 경로를 지정한 뒤 프로젝트 실행 스크립트를 사용합니다.
+
+```bash
+cd "$HOME/dofbot_rl"
+CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_reach_ik_direct_refine/<run>/model_999.pt" \
+  bash cmd/isaaclab.sh
+```
+
+이 스크립트는 Isaac Sim 6.0.1의 `isaacsim.ros2.core/jazzy`(Python 3.12)를 우선 사용하고,
+없을 때 `/opt/ros/jazzy`를 사용합니다. `ROS_DOMAIN_ID` 기본값은 `32`입니다.
 
 ## 관측 / 행동 / 보상
 

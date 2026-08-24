@@ -18,25 +18,32 @@ for source_dir in ("isaaclab", "isaaclab_rl", "isaaclab_tasks"):
 
 
 def _ros_args_requested() -> bool:
-    return (
-        "--use-ros-target" in sys.argv
-        or "--ros-target-topic" in sys.argv
-        or "--ros-publish-joint-states" in sys.argv
-        or "--ros-publish-gripper-control" in sys.argv
-        or "--no-ros-publish-joint-states" not in sys.argv
-        or "--no-ros-publish-gripper-control" not in sys.argv
+    ros_flags = (
+        "--use-ros-target",
+        "--ros-target-topic",
+        "--ros-publish-joint-states",
+        "--ros-publish-gripper-control",
     )
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv for flag in ros_flags)
 
 
-def _find_isaacsim_ros2_bridge_root() -> Path | None:
+def _selected_ros_distro() -> str:
+    """Return the ROS distribution supported by this Isaac Sim installation."""
     ros_distro = os.environ.get("ROS_DISTRO", "jazzy")
-    if ros_distro not in ("jazzy", "humble"):
-        ros_distro = "jazzy"
+    return ros_distro if ros_distro in ("jazzy", "humble") else "jazzy"
 
-    candidates = [
-        PROJECT_ROOT / "_isaac_sim" / "exts" / "isaacsim.ros2.bridge" / ros_distro,
-        Path.home() / "isaacsim" / "exts" / "isaacsim.ros2.bridge" / ros_distro,
-    ]
+
+def _find_isaacsim_ros2_core_root(ros_distro: str) -> Path | None:
+    isaacsim_path = os.environ.get("ISAACSIM_PATH")
+    candidates = []
+    if isaacsim_path:
+        candidates.append(Path(isaacsim_path) / "exts" / "isaacsim.ros2.core" / ros_distro)
+    candidates.extend(
+        (
+            Path.home() / "isaacsim" / "exts" / "isaacsim.ros2.core" / ros_distro,
+            Path.home() / "IsaacLab" / "_isaac_sim" / "exts" / "isaacsim.ros2.core" / ros_distro,
+        )
+    )
     for bridge_root in candidates:
         if (bridge_root / "rclpy").is_dir() and (bridge_root / "lib").is_dir():
             return bridge_root
@@ -44,7 +51,7 @@ def _find_isaacsim_ros2_bridge_root() -> Path | None:
 
 
 def _prepare_ros2_env_before_python_start() -> None:
-    """Re-exec with Isaac Sim's ROS2 bridge paths visible to the dynamic linker."""
+    """Re-exec with Isaac Sim 6's ROS2 core paths visible to Python and the linker."""
     if not _ros_args_requested() or os.environ.get("DOFBOT_ROS2_ENV_READY") == "1":
         return
 
@@ -56,26 +63,35 @@ def _prepare_ros2_env_before_python_start() -> None:
             os.environ["ROS_DOMAIN_ID"] = arg.split("=", 1)[1]
             break
 
-    bridge_root = _find_isaacsim_ros2_bridge_root()
+    ros_distro = _selected_ros_distro()
+    bridge_root = _find_isaacsim_ros2_core_root(ros_distro)
     if bridge_root is None:
-        return
-
-    rclpy_path = str(bridge_root / "rclpy")
-    lib_path = str(bridge_root / "lib")
+        python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        system_python_path = Path(f"/opt/ros/{ros_distro}/lib/{python_version}/site-packages")
+        system_lib_path = Path(f"/opt/ros/{ros_distro}/lib")
+        if not (system_python_path / "rclpy").is_dir():
+            raise RuntimeError(
+                "ROS 2 was requested, but neither Isaac Sim 6's internal ROS 2 core nor system rclpy was found. "
+                "Expected isaacsim.ros2.core/<distro> or /opt/ros/<distro>."
+            )
+        rclpy_path = str(system_python_path)
+        lib_path = str(system_lib_path)
+    else:
+        rclpy_path = str(bridge_root / "rclpy")
+        lib_path = str(bridge_root / "lib")
 
     env = os.environ.copy()
     env["DOFBOT_ROS2_ENV_READY"] = "1"
+    env["DOFBOT_ROS2_PYTHON_PATH"] = rclpy_path
+    env["ROS_DISTRO"] = ros_distro
+    env.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
 
     for key in ("PYTHONPATH", "LD_LIBRARY_PATH"):
-        entries = [entry for entry in env.get(key, "").split(":") if entry and "/opt/ros/" not in entry]
+        entries = [entry for entry in env.get(key, "").split(":") if entry]
         preferred = rclpy_path if key == "PYTHONPATH" else lib_path
         if preferred in entries:
             entries.remove(preferred)
         env[key] = ":".join([preferred] + entries)
-
-    for key in ("AMENT_PREFIX_PATH", "COLCON_PREFIX_PATH"):
-        if key in env:
-            env[key] = ":".join(entry for entry in env[key].split(":") if entry and "/opt/ros/" not in entry)
 
     os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
 
@@ -263,7 +279,7 @@ parser.add_argument(
 parser.add_argument(
     "--ros-publish-joint-states",
     action=argparse.BooleanOptionalAction,
-    default=True,
+    default=False,
     help="Publish simulated DOFBOT joint states on ROS2 for robot_state_publisher/TF.",
 )
 parser.add_argument(
@@ -293,7 +309,7 @@ parser.add_argument(
 parser.add_argument(
     "--ros-publish-gripper-control",
     action=argparse.BooleanOptionalAction,
-    default=True,
+    default=False,
     help="Publish an initial std_msgs/Float64 gripper command when play starts.",
 )
 parser.add_argument(
@@ -330,7 +346,12 @@ if (
     or args_cli.ros_publish_joint_states
     or args_cli.ros_publish_gripper_control
 ):
-    print(f"[INFO] ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', '0')}", flush=True)
+    print(
+        f"[INFO] ROS_DISTRO={os.environ.get('ROS_DISTRO', 'unset')} "
+        f"ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', '0')} "
+        f"RMW_IMPLEMENTATION={os.environ.get('RMW_IMPLEMENTATION', 'default')}",
+        flush=True,
+    )
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -348,51 +369,33 @@ import dofbot_rl.tasks  # noqa: F401
 
 
 def prefer_isaacsim_ros2_python() -> None:
-    """Prefer Isaac Sim's Python 3.11 ROS2 bridge modules over system ROS Python modules."""
-    ros_distro = os.environ.get("ROS_DISTRO", "jazzy")
-    if ros_distro not in ("jazzy", "humble"):
-        ros_distro = "jazzy"
+    """Ensure the ROS 2 Python path selected before AppLauncher stays first."""
+    rclpy_path = os.environ.get("DOFBOT_ROS2_PYTHON_PATH")
+    if rclpy_path and rclpy_path in sys.path:
+        sys.path.remove(rclpy_path)
+    if rclpy_path:
+        sys.path.insert(0, rclpy_path)
 
-    # The Ubuntu 24.04 /opt/ros/jazzy Python packages are built for Python 3.12.
-    # Isaac Sim 5.x runs Python 3.11, so mixing those modules with Isaac's
-    # internal ROS libraries can abort the process inside generated message
-    # converters. Remove system ROS Python entries before importing rclpy.
-    sys.path[:] = [path for path in sys.path if "/opt/ros/" not in path]
-    for module_name in list(sys.modules):
-        if module_name == "rclpy" or module_name.startswith(
-            (
-                "rclpy.",
-                "geometry_msgs",
-                "sensor_msgs",
-                "std_msgs",
-                "builtin_interfaces",
-                "rcl_interfaces",
-                "rosgraph_msgs",
-            )
-        ):
-            del sys.modules[module_name]
 
-    candidates = [
-        PROJECT_ROOT / "_isaac_sim" / "exts" / "isaacsim.ros2.bridge" / ros_distro,
-        Path.home() / "isaacsim" / "exts" / "isaacsim.ros2.bridge" / ros_distro,
-    ]
-    for bridge_root in candidates:
-        rclpy_path = bridge_root / "rclpy"
-        lib_path = bridge_root / "lib"
-        if not rclpy_path.is_dir():
-            continue
-        rclpy_path_str = str(rclpy_path)
-        if rclpy_path_str in sys.path:
-            sys.path.remove(rclpy_path_str)
-        sys.path.insert(0, rclpy_path_str)
-        if lib_path.is_dir():
-            lib_path_str = str(lib_path)
-            current_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
-            ld_entries = [entry for entry in current_ld_path.split(":") if entry and "/opt/ros/" not in entry]
-            if lib_path_str in ld_entries:
-                ld_entries.remove(lib_path_str)
-            os.environ["LD_LIBRARY_PATH"] = ":".join([lib_path_str] + ld_entries)
+_RCLPY_INITIALIZED_BY_PLAY = False
+
+
+def ensure_rclpy_initialized(rclpy) -> None:
+    """Initialize one shared rclpy context for all play publishers/subscribers."""
+    global _RCLPY_INITIALIZED_BY_PLAY
+    if not rclpy.ok():
+        rclpy.init(args=None)
+        _RCLPY_INITIALIZED_BY_PLAY = True
+
+
+def shutdown_rclpy() -> None:
+    """Shutdown the shared rclpy context after every node has been destroyed."""
+    if not _RCLPY_INITIALIZED_BY_PLAY:
         return
+    import rclpy
+
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 def normalize_ros_namespace(namespace: str) -> str:
@@ -438,17 +441,11 @@ class RosTargetSubscriber:
         except ImportError as exc:
             raise ImportError(
                 "ROS target streaming requires rclpy and geometry_msgs in the Isaac Python environment. "
-                "Isaac Sim uses Python 3.11, so do not let /opt/ros/jazzy Python 3.12 rclpy take precedence. "
-                "Run from a terminal that does not source /opt/ros/jazzy before Isaac, or prepend Isaac Sim's "
-                "internal ROS2 bridge paths to PYTHONPATH/LD_LIBRARY_PATH."
+                "For Isaac Sim 6.0.1, use its isaacsim.ros2.core/jazzy Python 3.12 packages or system ROS 2 Jazzy."
             ) from exc
 
         self.rclpy = rclpy
-        if not rclpy.ok():
-            rclpy.init(args=None)
-            self._owns_rclpy = True
-        else:
-            self._owns_rclpy = False
+        ensure_rclpy_initialized(rclpy)
 
         msg_classes = {
             "point": Point,
@@ -509,8 +506,6 @@ class RosTargetSubscriber:
 
     def close(self) -> None:
         self.node.destroy_node()
-        if self._owns_rclpy:
-            self.rclpy.shutdown()
 
 
 class RosJointStatePublisher:
@@ -524,18 +519,12 @@ class RosJointStatePublisher:
         except ImportError as exc:
             raise ImportError(
                 "JointState publishing requires rclpy and sensor_msgs in the Isaac Python environment. "
-                "Isaac Sim uses Python 3.11, so do not let /opt/ros/jazzy Python 3.12 rclpy take precedence. "
-                "Run from a terminal that does not source /opt/ros/jazzy before Isaac, or prepend Isaac Sim's "
-                "internal ROS2 bridge paths to PYTHONPATH/LD_LIBRARY_PATH."
+                "For Isaac Sim 6.0.1, use its isaacsim.ros2.core/jazzy Python 3.12 packages or system ROS 2 Jazzy."
             ) from exc
 
         self.rclpy = rclpy
         self.JointState = JointState
-        if not rclpy.ok():
-            rclpy.init(args=None)
-            self._owns_rclpy = True
-        else:
-            self._owns_rclpy = False
+        ensure_rclpy_initialized(rclpy)
 
         self.node = rclpy.create_node("dofbot_rl_joint_state_publisher", namespace=namespace)
         self.publisher = self.node.create_publisher(JointState, topic_name, 10)
@@ -566,8 +555,6 @@ class RosJointStatePublisher:
 
     def close(self) -> None:
         self.node.destroy_node()
-        if self._owns_rclpy:
-            self.rclpy.shutdown()
 
 
 class RosFloat64Publisher:
@@ -581,16 +568,12 @@ class RosFloat64Publisher:
         except ImportError as exc:
             raise ImportError(
                 "Float64 publishing requires rclpy and std_msgs in the Isaac Python environment. "
-                "Isaac Sim uses Python 3.11, so do not let /opt/ros/jazzy Python 3.12 rclpy take precedence."
+                "For Isaac Sim 6.0.1, use its isaacsim.ros2.core/jazzy Python 3.12 packages or system ROS 2 Jazzy."
             ) from exc
 
         self.rclpy = rclpy
         self.Float64 = Float64
-        if not rclpy.ok():
-            rclpy.init(args=None)
-            self._owns_rclpy = True
-        else:
-            self._owns_rclpy = False
+        ensure_rclpy_initialized(rclpy)
 
         self.node = rclpy.create_node(node_name, namespace=namespace)
         self.publisher = self.node.create_publisher(Float64, topic_name, 10)
@@ -609,8 +592,6 @@ class RosFloat64Publisher:
 
     def close(self) -> None:
         self.node.destroy_node()
-        if self._owns_rclpy:
-            self.rclpy.shutdown()
 
 
 def get_task_cfgs(task_id: str):
@@ -768,36 +749,30 @@ def main():
     dt = env.unwrapped.step_dt
     obs = env.get_observations()
     timestep = 0
-    ros_target = (
-        RosTargetSubscriber(ros_target_topic, args_cli.ros_target_msg, ros_namespace)
-        if env_cfg.use_ros_target and ros_target_topic
-        else None
-    )
-    joint_state_pub = (
-        RosJointStatePublisher(
-            ros_joint_state_topic,
-            unwrapped_env.robot.data.joint_names,
-            args_cli.ros_joint_state_rate,
-            ros_namespace,
-        )
-        if args_cli.ros_publish_joint_states
-        else None
-    )
-    gripper_control_pub = (
-        RosFloat64Publisher(
-            "dofbot_rl_gripper_control_publisher",
-            ros_gripper_control_topic,
-            ros_namespace,
-        )
-        if args_cli.ros_publish_gripper_control
-        else None
-    )
+    ros_target = None
+    joint_state_pub = None
+    gripper_control_pub = None
     filtered_target = None
     last_ros_debug_time = 0.0
     gripper_start_begin_time = time.monotonic()
     gripper_start_last_publish_time = 0.0
     gripper_start_period = 1.0 / args_cli.ros_gripper_start_rate if args_cli.ros_gripper_start_rate > 0.0 else 0.0
     try:
+        if env_cfg.use_ros_target and ros_target_topic:
+            ros_target = RosTargetSubscriber(ros_target_topic, args_cli.ros_target_msg, ros_namespace)
+        if args_cli.ros_publish_joint_states:
+            joint_state_pub = RosJointStatePublisher(
+                ros_joint_state_topic,
+                unwrapped_env.robot.data.joint_names,
+                args_cli.ros_joint_state_rate,
+                ros_namespace,
+            )
+        if args_cli.ros_publish_gripper_control:
+            gripper_control_pub = RosFloat64Publisher(
+                "dofbot_rl_gripper_control_publisher",
+                ros_gripper_control_topic,
+                ros_namespace,
+            )
         while simulation_app.is_running():
             start_time = time.time()
             if ros_target is not None:
@@ -852,6 +827,7 @@ def main():
             joint_state_pub.close()
         if gripper_control_pub is not None:
             gripper_control_pub.close()
+        shutdown_rclpy()
         env.close()
 
 
