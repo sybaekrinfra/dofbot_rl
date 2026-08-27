@@ -103,11 +103,42 @@ def main() -> None:
                 left_pos = unwrapped.robot.data.joint_pos[
                     :, unwrapped._gripper_mimic_joint_id
                 ]
+                object_height = unwrapped._task_state()[5]
+                fingertip_gap = unwrapped._fingertip_gap()
+                captured = unwrapped._object_between_fingertips()
+                grasp_pos = unwrapped._gripper_center_w()
+                object_pos = unwrapped.object.data.root_pos_w.torch
+                grasp_error = object_pos - grasp_pos
+                fingertips = unwrapped.robot.data.body_pos_w.torch[
+                    :, unwrapped._fingertip_body_ids
+                ]
+                fingertip_axis = fingertips[:, 1] - fingertips[:, 0]
+                fingertip_axis_sq = torch.sum(fingertip_axis**2, dim=-1).clamp_min(1.0e-9)
+                fingertip_projection = torch.sum(
+                    (object_pos - fingertips[:, 0]) * fingertip_axis, dim=-1
+                ) / fingertip_axis_sq
+                fingertip_centerline = (
+                    fingertips[:, 0]
+                    + fingertip_projection.unsqueeze(-1) * fingertip_axis
+                )
+                centerline_error = torch.linalg.norm(
+                    object_pos - fingertip_centerline, dim=-1
+                )
+                controlled_pos = unwrapped.robot.data.joint_pos[
+                    :, unwrapped._controlled_joint_ids
+                ]
                 print(
                     f"[GRASP DEBUG] step={step_count} phase={int(unwrapped._task_phase[0].item())} "
                     f"distance={reach_dist[0].item():.4f} action={actions[0, 5].item():+.3f} "
                     f"command={unwrapped._gripper_command[0].item():.3f} "
-                    f"right={right_pos[0].item():+.3f} left={left_pos[0].item():+.3f}",
+                    f"right={right_pos[0].item():+.3f} left={left_pos[0].item():+.3f} "
+                    f"gap={fingertip_gap[0].item():.4f} captured={bool(captured[0].item())} "
+                    f"height={object_height[0].item():.4f} "
+                    f"grasp_error=({grasp_error[0, 0].item():+.3f},"
+                    f"{grasp_error[0, 1].item():+.3f},{grasp_error[0, 2].item():+.3f}) "
+                    f"finger_t={fingertip_projection[0].item():+.2f} "
+                    f"centerline_error={centerline_error[0].item():.3f} "
+                    f"joints={[round(value, 3) for value in controlled_pos[0].tolist()]}",
                     flush=True,
                 )
             if args_cli.max_steps > 0 and step_count >= args_cli.max_steps:

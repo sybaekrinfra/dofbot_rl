@@ -92,61 +92,85 @@ CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_reach_ik_direct_refine/<run>/
 `assets/dofbot_v2/dofbot.usd`의 4축 arm, wrist, 물리 그리퍼를 사용하는 Direct-RL 환경이 포함되어 있습니다.
 정책 action은 `joint1~joint4 + Wrist_Twist`의 position delta 5개와 오른쪽 손가락 명령 1개로 총
 6차원입니다. 왼쪽 1번 손가락은 USD의 PhysX mimic 관계를 그대로 사용하므로 직접 명령하지 않습니다.
-정책 관측은 53차원이며 `reach → lift → pick_place` 순서로 체크포인트를 이어받습니다.
+정책 관측은 62차원이며 `reach → lift → pick_place` 순서로 체크포인트를 이어받습니다.
 
-실제 grasp 기준점은 `Finger_Right_02` Xform의 로컬 좌표
-`(0.00004, 0.020316, 0.019236) m`를 world 좌표로 변환해서 사용합니다. 정책은 단순히 물체와
-목표점 사이 거리만 줄이지 않고 아래 5단계 one-hot 상태를 관측합니다.
+사용자가 지정한 `Finger_Right_02` 로컬 점 `(0.00004, 0.020316, 0.019236) m`은 TCP 보정의
+원본 측정값입니다. 이 링크는 그리퍼가 닫힐 때 움직이므로, 런타임 정책은 이 점에서 보정한
+`Wrist_Twist` 고정 프레임의 jaw 중앙점을 사용합니다. 정책은 아래 5단계 one-hot 상태를 관측합니다.
 
-1. 열린 그리퍼를 물체 위 `0.08 m` pre-grasp 위치로 이동하고 지면 법선에 수직 정렬
+1. 열린 그리퍼를 물체 중심보다 `0.055 m` 높은 pre-grasp 위치로 이동하고 수직 정렬
 2. 보정된 grasp point를 물체에 내린 뒤 그리퍼 닫기
 3. 물체의 자세를 유지하며 부드럽게 들어 올리기
-4. 물체를 목표점 위 `0.08 m` 위치로 운반
-5. 목표점으로 내린 뒤 그리퍼 열기
+4. 물체를 목표점보다 `0.015 m` 높은 위치로 운반
+5. 물체를 테이블에서 `2 mm` 이내까지 내리고 안정화한 뒤 천천히 그리퍼 열기
 
 운반 중에는 action 변화량, 물체 각속도와 기울기에 penalty가 적용됩니다. 물체의 up-axis와
-각속도, 그리퍼 접근축 및 현재 단계를 포함하므로 최종 정책 관측은 53차원입니다.
+각속도, 그리퍼 접근축, 현재 단계, 단계별 연속-hold 상태, 실제 양쪽 접촉력을 포함하므로
+최종 정책 관측은 62차원입니다.
 
-리셋 시 팔은 singularity를 피한 `(joint2, joint3, joint4)=(-0.85, -1.10, -0.40) rad` 자세로
-시작하고, `joint1=-atan2(cube_x, cube_y)`로 설정되어 샘플된 첫 큐브를 향합니다. joint2의 action
-scale은 작게 유지하며, joint3는 측정 기반 초기값과 posture penalty로 화면상 반대방향 굽힘을
-유도합니다. 측정 기반 초기값과 약한 posture penalty로 같은 성과라면 joint2를 과도하게
-접는 대신 joint3·joint4를 활용하도록 유도합니다. 이 6-action/53-observation 환경은
-이전 4-action/35-observation 모델 및 중간 6-action/39-observation 모델과 호환되지 않으므로
+모든 episode는 `joint1, joint2, joint3, joint4, wrist, right finger = (0, 0, 0, 0, 0, 0)`에서
+시작합니다. arm/wrist 5축은 모두 `-90°~+90°`, 오른쪽 finger driver는 `-57°~+33°`이고
+음수가 열림, 양수가 닫힘입니다. reset은 0°를 유지하되 phase 0에서 driver를 `-0.50 rad`로
+열고, grasp/carry/release gate는 wrist가 0°±8° 안에 있을 때만 통과합니다. 왼쪽 finger는
+USD mimic 관계만 사용합니다. 이
+6-action/62-observation 환경은
+이전 4-action/35-observation, 6-action/39-observation 및 6-action/53-observation 모델과
+호환되지 않으므로
 기존 Pick–Place 모델을 resume하지 말고 Reach 단계부터 새로 학습해야 합니다.
 
-joint1부터 joint4 및 Wrist까지 정책 target 범위는 실제 사양과 동일하게 모두 `-90°~+90°`입니다.
-긴 말단 링크가 테이블을 훑는 것을 막기 위해 joint2에는 낮은 action scale과 별도 action/posture
-penalty가 적용되며, 부족한 reach는 joint3·joint4가 담당합니다. 또한 단계마다 보정 grasp point의
-최소 테이블 여유 높이를 검사하고, 낮게 훑으면 penalty를 주며 테이블 높이 아래로 침범하면 해당
-episode를 즉시 종료합니다.
+단계 전환은 한 프레임 조건이 아닙니다. pre-grasp, grasp, lift, transport gate를 각각
+`4, 6, 8, 8` control step 연속 만족해야 다음 phase로 갑니다. Place pose는 위치·높이·선속도·각속도·
+기울기를 12 step 유지해야 release가 허용되고, 최종 성공은 실제 finger joint/gap으로 열린 상태와
+안정된 cube pose를 20 step 유지해야 합니다. 허가 전에는 phase 4에서도 물리 그립을 강제로 유지합니다.
 
 모든 task 좌표는 DOFBOT의 `base_link=(0, 0, 0)` 기준입니다. 로봇은 identity quaternion
 `(x, y, z, w)=(0, 0, 0, 1)`로 배치되고, object와 goal 위치 및 정책 관측도 실제 `base_link`
 world position을 빼서 계산합니다. 스모크 테스트는 base 오차가 `1e-5 m`를 넘으면 실패합니다.
 
-먼저 환경을 짧게 검사합니다.
+먼저 64개 환경에서 모든 actuator와 mimic을 검사합니다.
 
 ```bash
 cd "$HOME/IsaacLab"
 ./isaaclab.sh -p "$HOME/dofbot_rl/smoke_test.py" \
   --task Dofbot-V2-PickPlace-Direct-v0 \
-  --num_envs 4 --num_steps 20 --actuator_test --device cuda:0 --viz none
+  --num_envs 64 --num_steps 20 --actuator_test --device cuda:0 --viz none
 ```
 
-학습은 아래 순서대로 실행합니다. `lift`는 최신 `*_reach` run을, `pick_place`는 최신 `*_lift` run을
-자동으로 찾아 이어서 학습합니다.
+PPO 전에 checkpoint 없이 전체 물리 경로를 결정론적으로 검사할 수 있습니다.
+
+```bash
+cd "$HOME/IsaacLab"
+./isaaclab.sh -p "$HOME/dofbot_rl/cmd/sanity_grasp_lift.py" \
+  --full_pick_place --device cuda:0 --viz none --log_interval 120
+```
+
+권장 실행은 아래 end-to-end 명령 하나입니다. deterministic sanity가 먼저 통과해야 Reach가 시작되며,
+각 단계의 정확한 새 checkpoint만 다음 단계에 전달합니다. 중단됐거나 요구 iteration이 없는 run,
+학습률이 `3e-4`가 아닌 과거 adaptive-LR checkpoint, 물리 gate 기준에 미달한 run은 자동 중단됩니다.
+
+```bash
+cd "$HOME/dofbot_rl"
+NUM_ENVS=2048 PLAY_AFTER_EACH=1 bash cmd/end-to-end.sh
+```
+
+기본 curriculum은 `1000 → 2000 → 4000` iteration을 추가하며 체크포인트 번호는 RSL-RL resume
+인덱스 규칙에 따라 `model_999.pt → model_2998.pt → model_6997.pt`가 됩니다. 환경 수는 시스템
+안전을 위해 모든 실행 스크립트에서 `1..2048`로 제한합니다.
+
+각 단계를 수동 실행하려면 아래 순서를 사용합니다. 기본 자동 검색은 이름이 정확히 `_reach`,
+`_lift`로 끝나는 canonical run만 허용합니다.
 
 ```bash
 cd "$HOME/dofbot_rl"
 
-STAGE=reach NUM_ENVS=64 MAX_ITERATIONS=1000 bash cmd/train_pick_place.sh
-STAGE=lift NUM_ENVS=64 MAX_ITERATIONS=2000 bash cmd/train_pick_place.sh
-STAGE=pick_place NUM_ENVS=64 MAX_ITERATIONS=4000 bash cmd/train_pick_place.sh
+STAGE=reach NUM_ENVS=2048 MAX_ITERATIONS=1000 bash cmd/train_pick_place.sh
+STAGE=lift NUM_ENVS=2048 MAX_ITERATIONS=2000 bash cmd/train_pick_place.sh
+STAGE=pick_place NUM_ENVS=2048 MAX_ITERATIONS=4000 bash cmd/train_pick_place.sh
 ```
 
-중간 단계부터 새로 학습하려면 `RESUME=0`을 추가합니다. 특정 run을 이어받으려면
-`LOAD_RUN=2026-..._reach`와 `CHECKPOINT_PATTERN=model_.*.pt`를 지정합니다.
+환경·보상·관측이 변경됐으므로 현재는 반드시 `RESUME=0`인 새 Reach부터 시작해야 합니다.
+특정 checkpoint를 수동 지정할 때는 예를 들어 `LOAD_RUN='^2026-..._reach$'`와
+`CHECKPOINT_PATTERN='^model_999[.]pt$'`처럼 양 끝을 고정합니다.
 
 최종 정책을 GUI에서 재생합니다.
 
@@ -156,33 +180,37 @@ CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_v2_pick_place/<run>/<model>.p
   bash cmd/play_pick_place.sh
 ```
 
-## 관측 / 행동 / 보상
+## DOFBOT_V2 관측 / 행동 / 보상
 
 ### 관측
 
-관측값은 아래 항목으로 구성됩니다.
+62차원 관측은 아래 항목으로 구성됩니다.
 
-- 5개 joint position
-- 5개 joint velocity
-- 3개 end-effector position
-- 3개 target position
-- 5개 previous action
+- arm/wrist position·velocity 10개와 finger position·velocity 4개
+- base_link 기준 gripper/object/goal position 9개
+- grasp/goal delta 6개와 object 선속도 3개
+- gripper command 1개와 previous action 6개
+- grasp 접근축 3개, phase one-hot 5개, object up-axis·각속도 6개
+- phase/place/success hold, release authorization, grasp-loss 상태 5개
+- reset 위치 대비 cube XY 변위 2개와 실제 좌·우 fingertip 접촉력 2개
 
 ### 행동
 
-- 5차원 연속 제어
-- 각 action은 joint position increment로 해석
+- `joint1~joint4 + wrist` position increment 5개
+- 오른쪽 finger 열기/닫기 명령 1개
 
 ### 보상
 
-- end-effector와 target 사이 거리 기반 보상
-- action penalty
-- 성공 보너스
+- 각 phase의 signed distance/progress와 한 번만 지급되는 phase 완료 보상
+- 수직 정렬, 안정적 lift/transport/place, 실제 bilateral grasp 보상
+- action rate, 바닥 훑기, cube 밀기, grasp 손실, 각속도·기울기 penalty
+- 안정된 실제 release를 20 step 유지했을 때의 성공 보너스
 
 ### 종료 조건
 
-- end-effector가 target에 충분히 가까워지면 성공 종료
-- 샘플 수가 길어지면 timeout 종료
+- stage별 held physical success, timeout
+- cube 낙하/작업영역 이탈, TCP 바닥 충돌, capture 전 cube 과다 이동
+- lift/transport/place 중 grasp 손실, release 허가 전 조기 개방, joint limit 오류
 
 ## 자산 준비
 

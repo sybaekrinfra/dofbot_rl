@@ -25,7 +25,10 @@ class DofbotReachPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
-        schedule="adaptive",
+        # rsl_rl 3.0 raises adaptive LR by 1.5x up to 1e-2 whenever measured
+        # KL is below half the target.  The recorded runs reached that ceiling,
+        # so keep the verified conservative rate instead.
+        schedule="fixed",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
@@ -60,11 +63,14 @@ class DofbotPickPlacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        # 2048 parallel environments already provide broad exploration.  A
+        # smaller entropy bonus lets Reach converge to millimetre-scale XY/Z.
+        entropy_coef=0.001,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
-        schedule="adaptive",
+        # Do not let low early-stage KL inflate 3e-4 to rsl_rl's 1e-2 cap.
+        schedule="fixed",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,

@@ -27,6 +27,10 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if not 1 <= args_cli.num_envs <= 2048:
+    parser.error(f"--num_envs must be in the safe range 1..2048 (got {args_cli.num_envs})")
+if args_cli.num_steps < 1:
+    parser.error(f"--num_steps must be positive (got {args_cli.num_steps})")
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -73,20 +77,85 @@ def run_pick_place_actuator_test(env) -> None:
         )
     print("[JOINT LIMIT] Finger_Right_01 driver: -57.0 to +33.0 deg (90.0 deg total)", flush=True)
 
+    # Vertical alignment alone cannot detect a twist around the wrist Z axis.
+    # Prove that a +/-90-degree wrist cannot advance even an otherwise perfect
+    # pre-grasp sample, then restore the required all-zero reset state.
+    wrist_test_pos = unwrapped.robot.data.joint_pos.clone()
+    wrist_test_pos[:, unwrapped._wrist_joint_id] = 0.5 * torch.pi
+    unwrapped.robot.write_joint_state_to_sim(
+        wrist_test_pos, torch.zeros_like(wrist_test_pos)
+    )
+    unwrapped._joint_targets[:] = wrist_test_pos
+    unwrapped._task_phase.zero_()
+    unwrapped._phase_gate_hold_count.zero_()
     zeros = torch.zeros((unwrapped.num_envs,), device=unwrapped.device)
     ones = torch.ones_like(zeros)
+    unwrapped._update_task_phase(
+        zeros,
+        zeros,
+        zeros,
+        ones,
+        ones,
+        ones,
+        ones,
+        zeros,
+        ones,
+        zeros.bool(),
+    )
+    if not bool(torch.all(unwrapped._task_phase == 0)):
+        raise RuntimeError("A 90-degree wrist twist advanced the pre-grasp phase")
+    print("[WRIST GATE] +90 deg cannot advance pre-grasp: ok", flush=True)
+    env.reset()
+
     unwrapped._task_phase.zero_()
     unwrapped._gripper_command.zero_()
-    unwrapped._update_task_phase(zeros, ones, ones, ones, zeros, ones, zeros.bool())
+    unwrapped._update_task_phase(
+        zeros,
+        zeros,
+        zeros,
+        ones,
+        ones,
+        ones,
+        ones,
+        zeros,
+        ones,
+        zeros.bool(),
+    )
     unwrapped._gripper_command.fill_(0.8)
-    unwrapped._update_task_phase(ones, zeros, ones, ones, zeros, ones, zeros.bool())
+    unwrapped._update_task_phase(
+        ones,
+        ones,
+        ones,
+        zeros,
+        ones,
+        ones,
+        ones,
+        zeros,
+        ones,
+        zeros.bool(),
+    )
     if not bool(torch.all(unwrapped._task_phase == 1)):
         raise RuntimeError("A gripper command without measured finger travel advanced the grasp phase")
-    unwrapped._update_task_phase(ones, zeros, ones, ones, zeros, ones, ones.bool())
     unwrapped._update_task_phase(
-        ones, zeros, ones, ones, ones * (unwrapped.cfg.lift_height + 0.01), ones, ones.bool()
+        ones,
+        ones,
+        ones,
+        zeros,
+        ones,
+        ones,
+        ones,
+        zeros,
+        ones,
+        ones.bool(),
     )
-    unwrapped._update_task_phase(ones, zeros, zeros, zeros, ones, ones, ones.bool())
+    unwrapped._update_task_phase(
+        ones, ones, ones, zeros, ones, ones, ones,
+        ones * (unwrapped.cfg.lift_height + 0.01), ones, ones.bool(),
+    )
+    unwrapped._update_task_phase(
+        ones, ones, ones, zeros, zeros, zeros, zeros,
+        ones * (unwrapped.cfg.lift_height + 0.01), ones, ones.bool(),
+    )
     expected_phase = {"reach": 2, "lift": 3, "pick_place": 4}[unwrapped.cfg.curriculum_stage]
     if not bool(torch.all(unwrapped._task_phase == expected_phase)):
         raise RuntimeError(f"Pick–Place phase transition failed: {unwrapped._task_phase}")
@@ -100,16 +169,25 @@ def run_pick_place_actuator_test(env) -> None:
 
     for action_index, (joint_name, joint_id) in enumerate(zip(driven_names, driven_ids, strict=True)):
         env.reset()
-        before = float(unwrapped.robot.data.joint_pos[0, joint_id].item())
+        before_all = unwrapped.robot.data.joint_pos[:, joint_id].clone()
         action = torch.zeros((unwrapped.num_envs, unwrapped.cfg.action_space), device=unwrapped.device)
         action[:, action_index] = 1.0
         for _ in range(10):
             env.step(action)
-        after = float(unwrapped.robot.data.joint_pos[0, joint_id].item())
-        delta = after - before
-        print(f"[ACTUATOR] {joint_name}: before={before:+.5f} after={after:+.5f} delta={delta:+.5f}", flush=True)
-        if abs(delta) < 0.01:
-            raise RuntimeError(f"DOFBOT_V2 driven joint did not move: {joint_name}, delta={delta}")
+        after_all = unwrapped.robot.data.joint_pos[:, joint_id]
+        delta_all = after_all - before_all
+        min_delta = float(torch.min(torch.abs(delta_all)).item())
+        print(
+            f"[ACTUATOR] {joint_name}: before={before_all[0].item():+.5f} "
+            f"after={after_all[0].item():+.5f} delta={delta_all[0].item():+.5f} "
+            f"batch_abs_delta=[{min_delta:.5f}, {torch.max(torch.abs(delta_all)).item():.5f}]",
+            flush=True,
+        )
+        if min_delta < 0.01:
+            raise RuntimeError(
+                f"DOFBOT_V2 driven joint did not move in every environment: "
+                f"{joint_name}, min_abs_delta={min_delta}"
+            )
 
     env.reset()
     right_id = unwrapped._gripper_driver_joint_id
@@ -131,6 +209,7 @@ def run_pick_place_actuator_test(env) -> None:
     object_state[:, 7:] = 0.0
     unwrapped.object.write_root_pose_to_sim(object_state[:, :7])
     unwrapped.object.write_root_velocity_to_sim(object_state[:, 7:])
+    unwrapped._object_initial_pos_w[:] = object_state[:, :3]
     open_action = torch.zeros(
         (unwrapped.num_envs, unwrapped.cfg.action_space), device=unwrapped.device
     )
@@ -149,7 +228,12 @@ def run_pick_place_actuator_test(env) -> None:
     )
     close_action = torch.zeros((unwrapped.num_envs, unwrapped.cfg.action_space), device=unwrapped.device)
     close_action[:, 5] = 1.0
+    # Phase 0 intentionally forces the gripper open. Phase 2 retains a commanded
+    # grasp and therefore isolates the physical close/mimic actuator test.
     for _ in range(60):
+        unwrapped._task_phase.fill_(2)
+        unwrapped._grasp_loss_steps.zero_()
+        unwrapped._task_failed.zero_()
         env.step(close_action)
     right_delta_all = unwrapped.robot.data.joint_pos[:, right_id] - right_before_all
     left_delta_all = unwrapped.robot.data.joint_pos[:, left_id] - left_before_all
@@ -162,12 +246,10 @@ def run_pick_place_actuator_test(env) -> None:
     left_delta = float(left_delta_all[0].item())
     gap_before = float(gap_before_all[0].item())
     gap_after = float(gap_after_all[0].item())
-    required_travel = 0.95 * unwrapped.cfg.gripper_driver_grasp_travel
-    required_gap_reduction = 0.95 * unwrapped.cfg.gripper_gap_grasp_travel
     closing = (
-        (right_delta_all >= required_travel)
-        & (left_delta_all <= -required_travel)
-        & ((gap_before_all - gap_after_all) >= required_gap_reduction)
+        (unwrapped.robot.data.joint_pos[:, right_id] >= unwrapped.cfg.gripper_driver_grasp_min_position)
+        & (left_delta_all < -0.10)
+        & (gap_after_all <= unwrapped.cfg.gripper_grasp_max_gap)
     )
     print(
         f"[ACTUATOR] right-finger driver delta={right_delta:+.5f}, "
@@ -200,12 +282,18 @@ def main():
     else:
         raise ValueError(f"Unsupported DOFBOT task id: {task_id}")
     env_cfg.scene.num_envs = args_cli.num_envs
+    if args_cli.actuator_test and hasattr(env_cfg, "phase_transition_hold_steps"):
+        # The synthetic state-machine check below deliberately evaluates one
+        # sample per gate; physical hold timing is covered by deterministic sanity.
+        env_cfg.phase_transition_hold_steps = (1, 1, 1, 1)
     env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device
 
     env = gym.make(task_id, cfg=env_cfg, render_mode=None)
     obs, _ = env.reset()
     print(f"[SMOKE] reset ok: obs={tuple(obs['policy'].shape)}", flush=True)
+    if not bool(torch.isfinite(obs["policy"]).all()):
+        raise RuntimeError("Non-finite observation detected immediately after reset")
     if task_id in (PICK_PLACE_REACH_ENV_ID, PICK_PLACE_LIFT_ENV_ID, PICK_PLACE_ENV_ID):
         unwrapped = env.unwrapped
         base_id = unwrapped.robot.find_bodies("base_link")[0][0]
@@ -218,23 +306,31 @@ def main():
         )
         if max_base_error > 1.0e-5:
             raise RuntimeError(f"DOFBOT_V2 base_link is not at local origin: max error={max_base_error}")
-        object_local = unwrapped.object.data.root_pos_w.torch - unwrapped._base_pos_w()
-        expected_joint1 = -torch.atan2(object_local[:, 0], object_local[:, 1])
-        actual_joint1 = unwrapped.robot.data.joint_pos[:, unwrapped._arm_joint_ids[0]]
-        max_heading_error = float(torch.max(torch.abs(actual_joint1 - expected_joint1)).item())
+        initial_driven = unwrapped.robot.data.joint_pos[:, unwrapped._controlled_joint_ids]
+        initial_driver = unwrapped.robot.data.joint_pos[:, unwrapped._gripper_driver_joint_id]
+        max_initial_error = float(
+            torch.max(torch.abs(torch.cat((initial_driven, initial_driver.unsqueeze(-1)), dim=-1))).item()
+        )
         print(
-            f"[SMOKE] cube heading: expected_joint1={expected_joint1[0].item():+.5f} "
-            f"actual_joint1={actual_joint1[0].item():+.5f} error={max_heading_error:.5f}",
+            f"[SMOKE] initial driven joints={initial_driven[0].detach().cpu().tolist()} "
+            f"right_finger={initial_driver[0].item():+.6f} max_error={max_initial_error:.8f}",
             flush=True,
         )
-        if max_heading_error > unwrapped.cfg.initial_joint_noise_rad + 1.0e-3:
-            raise RuntimeError(f"joint1 does not face the sampled cube: error={max_heading_error}")
+        if max_initial_error > 1.0e-5:
+            raise RuntimeError(
+                "DOFBOT controlled joint reset is not exactly (0, 0, 0, 0, 0, 0): "
+                f"max error={max_initial_error}"
+            )
         if args_cli.actuator_test:
             run_pick_place_actuator_test(env)
 
     for step_idx in range(args_cli.num_steps):
         actions = 2.0 * torch.rand((env.unwrapped.num_envs, env.unwrapped.cfg.action_space), device=env.unwrapped.device) - 1.0
         obs, reward, terminated, truncated, _ = env.step(actions)
+        if not bool(torch.isfinite(obs["policy"]).all()):
+            raise RuntimeError(f"Non-finite observation detected at step {step_idx + 1}")
+        if not bool(torch.isfinite(reward).all()):
+            raise RuntimeError(f"Non-finite reward detected at step {step_idx + 1}")
         print(
             f"[SMOKE] step {step_idx + 1}: "
             f"obs={tuple(obs['policy'].shape)} "
@@ -244,6 +340,10 @@ def main():
         )
 
     env.close()
+    print(
+        f"[SMOKE:PASS] task={task_id} envs={args_cli.num_envs} steps={args_cli.num_steps}",
+        flush=True,
+    )
     sys.stdout.flush()
 
 
