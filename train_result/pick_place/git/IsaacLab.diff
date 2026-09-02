@@ -1,0 +1,13 @@
+--- git commit ---
+af1bab4dc173ba69b08fab779c14ead61d13fd33
+
+
+--- git status ---
+On branch release/3.0.0-beta2
+Your branch is behind 'origin/release/3.0.0-beta2' by 13 commits, and can be fast-forwarded.
+  (use "git pull" to update your local branch)
+
+nothing to commit, working tree clean 
+
+
+--- git diff ---

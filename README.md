@@ -185,6 +185,46 @@ CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_v2_pick_place/<run>/<model>.p
   bash cmd/play_pick_place.sh
 ```
 
+### 제공된 학습 결과(`train_result`) 재생
+
+이 저장소의 `train_result` 폴더에는 학습이 완료된 레퍼런스 체크포인트와 당시의
+`agent.yaml`, `env.yaml`, TensorBoard event가 단계별로 들어 있습니다. 별도로 학습하지 않고
+현재 코드와 DOFBOT_V2 에셋에서 결과를 확인하려면 아래 명령을 사용합니다.
+
+Reach 최종 결과(`model_999.pt`)를 재생합니다.
+
+```bash
+cd "$HOME/dofbot_rl"
+TASK="Dofbot-V2-PickPlace-Reach-Direct-v0" \
+CHECKPOINT_PATH="$HOME/dofbot_rl/train_result/reach/model_999.pt" \
+VIZ_MODE=kit \
+bash cmd/play_pick_place.sh --debug_interval 30
+```
+
+Lift 최종 결과(`model_2998.pt`)를 재생합니다.
+
+```bash
+cd "$HOME/dofbot_rl"
+TASK="Dofbot-V2-PickPlace-Lift-Direct-v0" \
+CHECKPOINT_PATH="$HOME/dofbot_rl/train_result/lift/model_2998.pt" \
+VIZ_MODE=kit \
+bash cmd/play_pick_place.sh --debug_interval 30
+```
+
+전체 Pick Place 최종 결과(`model_4997.pt`)를 재생합니다.
+
+```bash
+cd "$HOME/dofbot_rl"
+TASK="Dofbot-V2-PickPlace-Direct-v0" \
+CHECKPOINT_PATH="$HOME/dofbot_rl/train_result/pick_place/model_4997.pt" \
+VIZ_MODE=kit \
+bash cmd/play_pick_place.sh --debug_interval 30
+```
+
+`train_result`의 체크포인트는 현재 70차원 관측, 6차원 행동 및 현재 DOFBOT_V2 에셋을
+기준으로 생성되었습니다. 환경 구성이나 관측 차원을 변경한 코드에서는 그대로 호환되지
+않을 수 있습니다. GUI 없이 실행하려면 `VIZ_MODE=kit`을 `VIZ_MODE=none`으로 바꿉니다.
+
 ## DOFBOT_V2 관측 / 행동 / 보상
 
 ### 관측
