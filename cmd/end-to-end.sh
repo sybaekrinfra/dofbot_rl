@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-$HOME/dofbot_rl}"
 ISAACLAB_DIR="${ISAACLAB_DIR:-$HOME/IsaacLab}"
 LOG_DIR="${LOG_DIR:-$ISAACLAB_DIR/logs/rsl_rl/dofbot_v2_pick_place}"
-NUM_ENVS="${NUM_ENVS:-2048}"
+NUM_ENVS="${NUM_ENVS:-1024}"
 PLAY_AFTER_EACH="${PLAY_AFTER_EACH:-1}"
 PLAY_VIZ_MODE="${PLAY_VIZ_MODE:-kit}"
 RUN_SANITY="${RUN_SANITY:-1}"
@@ -15,8 +15,8 @@ REACH_ITERATIONS="${REACH_ITERATIONS:-1000}"
 LIFT_ITERATIONS="${LIFT_ITERATIONS:-2000}"
 PICK_PLACE_ITERATIONS="${PICK_PLACE_ITERATIONS:-4000}"
 
-if [[ ! "$NUM_ENVS" =~ ^[0-9]+$ ]] || (( NUM_ENVS < 1 || NUM_ENVS > 2048 )); then
-  echo "NUM_ENVS must be an integer in the safe range 1..2048 (got: $NUM_ENVS)" >&2
+if [[ ! "$NUM_ENVS" =~ ^[0-9]+$ ]] || (( NUM_ENVS < 1 || NUM_ENVS > 1024 )); then
+  echo "NUM_ENVS must be an integer in the safe range 1..1024 (got: $NUM_ENVS)" >&2
   exit 2
 fi
 for iterations in "$REACH_ITERATIONS" "$LIFT_ITERATIONS" "$PICK_PLACE_ITERATIONS"; do

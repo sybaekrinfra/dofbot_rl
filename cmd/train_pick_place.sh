@@ -6,11 +6,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROJECT_PARENT="$(dirname -- "$PROJECT_DIR")"
 STAGE="${STAGE:-reach}"
-NUM_ENVS="${NUM_ENVS:-2048}"
+NUM_ENVS="${NUM_ENVS:-1024}"
 VIZ_MODE="${VIZ_MODE:-none}"
 
-if [[ ! "$NUM_ENVS" =~ ^[0-9]+$ ]] || (( NUM_ENVS < 1 || NUM_ENVS > 2048 )); then
-  echo "NUM_ENVS must be an integer in the safe range 1..2048 (got: $NUM_ENVS)" >&2
+if [[ ! "$NUM_ENVS" =~ ^[0-9]+$ ]] || (( NUM_ENVS < 1 || NUM_ENVS > 1024 )); then
+  echo "NUM_ENVS must be an integer in the safe range 1..1024 (got: $NUM_ENVS)" >&2
   exit 2
 fi
 
@@ -61,7 +61,7 @@ fi
 # Keep the validated environment count, task, stage lineage and logging path
 # authoritative.  argparse accepts duplicate options and the final occurrence
 # wins, so forwarding one of these through "$@" would otherwise bypass the
-# checks above (for example: --num_envs 8192).
+# checks above (for example: --num_envs 2048).
 for extra_arg in "$@"; do
   case "$extra_arg" in
     --rl_library|--rl_library=*|\
@@ -103,7 +103,7 @@ if [[ "$RESUME" == "1" ]]; then
     --load-run "$LOAD_RUN" \
     --checkpoint-pattern "$CHECKPOINT_PATTERN" \
     --expected-learning-rate 0.0003 \
-    --expected-observations 62 \
+    --expected-observations 70 \
     --expected-actions 6
   TRAIN_ARGS+=(--resume --load_run "$LOAD_RUN" --checkpoint "$CHECKPOINT_PATTERN")
 fi

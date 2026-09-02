@@ -44,16 +44,21 @@ def make_dofbot_v2_spawn_cfg() -> sim_utils.UsdFileCfg:
 class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     """Direct-RL Pick–Place task using the physical DOFBOT_V2 gripper."""
 
-    episode_length_s: float = 8.0
+    # The deterministic physical reference needs roughly 2,400 control steps
+    # for a low-impact Pick-Place.  At 60 Hz, the old eight-second horizon
+    # expired after only 480 steps and therefore rewarded unsafe shortcuts.
+    episode_length_s: float = 45.0
     decimation: int = 2
-    # joint1, joint2, joint3, joint4, wrist joint deltas + right-finger command.
+    # joint1..joint4 incremental targets + zero-held wrist action slot + right-finger command.
     # The left finger is a PhysX mimic joint and must never receive a target.
     action_space: int = 6
-    # Existing state (39) + grasp axis (3) + phase one-hot (5)
+    # Existing state (39) + commanded-minus-measured joint servo error (5)
+    # + active phase target error (3)
+    # + grasp axis (3) + phase one-hot (5)
     # + object up-axis (3) + object angular velocity (3)
     # + normalized state-machine memory (5) + initial XY displacement (2)
     # + bilateral fingertip contact forces (2).
-    observation_space: int = 62
+    observation_space: int = 70
     state_space: int = 0
     clip_observations: float = 5.0
     clip_actions: float = 1.0
@@ -61,6 +66,42 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     curriculum_stage: str = "pick_place"
     # All five arm joints are policy-controlled with the same per-step scale.
     joint_action_scales: tuple[float, ...] = (0.05, 0.05, 0.05, 0.05, 0.05)
+    # FK/PhysX-verified open-jaw descent seed for the nominal cube at
+    # base-local (x=0, y=0.13).  During phase 1 the environment advances toward
+    # this pose slowly and lets PPO learn only a small residual, preventing the
+    # inherited Reach policy from making "hold above cube" a permanent local
+    # optimum. joint1 is adjusted online for cube azimuth.
+    phase1_grasp_joint_seed_rad: tuple[float, ...] = (
+        0.00772026,
+        -0.07229876,
+        -1.28563094,
+        -1.57079633,
+    )
+    phase1_descent_step_rad: float = 0.004
+    phase1_residual_action_scale_rad: float = 0.002
+    # GPU/PhysX-verified low-impact path from a held lift to the nominal goal.
+    # joint1 is rotated online to the sampled goal azimuth.  PPO supplies only
+    # a small residual; it may not discard a valid Lift by wandering in phase 3.
+    phase3_transport_joint_waypoints_rad: tuple[tuple[float, ...], ...] = (
+        (-0.00612399, 0.45399830, -1.46824086, -1.57079637),
+        (-0.00583472, 0.27263775, -1.34727573, -1.54318631),
+        (-0.00575087, 0.08220811, -1.18038702, -1.54920959),
+        (-0.00538859, -0.04132476, -1.08928907, -1.51298249),
+        (-0.00495655, -0.10750190, -1.06922424, -1.44557965),
+        (-0.00517364, -0.30802634, -0.77982640, -1.57079637),
+    )
+    phase3_transport_step_rad: float = 0.0025
+    phase3_waypoint_steps: int = 160
+    phase3_residual_action_scale_rad: float = 0.0004
+    # Loaded 207-mm/47-mm TCP solution used by the deterministic Place test.
+    phase4_lower_joint_seed_rad: tuple[float, ...] = (
+        -0.00633477,
+        -0.73609257,
+        -0.44272771,
+        -1.54824066,
+    )
+    phase4_lower_step_rad: float = 0.0015
+    phase4_residual_action_scale_rad: float = 0.00025
     gripper_action_smoothing: float = 0.50
     # Once a settled place pose authorizes release, open the jaw over several
     # control frames instead of abruptly removing both normal forces.
@@ -130,9 +171,11 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     gripper_driver_closed_target: float = 0.50
     # The USD-authored RIGHT driver range is -57..+33 degrees; the LEFT mimic is
     # -33..+57. Negative opens and positive closes the commanded right finger.
-    # Use an absolute closure measurement.  This value is revalidated against
-    # bilateral contact after correcting the fixed jaw-center TCP above.
-    gripper_driver_grasp_min_position: float = 0.20
+    # Use an absolute closure measurement, but do not demand free-space travel
+    # after the cube has physically stopped the jaw.  Boundary replay measured
+    # +0.172 rad with 0.08/0.11 N bilateral contact and a valid 51.55-mm gap.
+    # Contact, gap and capture-distance gates still all have to agree.
+    gripper_driver_grasp_min_position: float = 0.15
     gripper_open_gap: float = 0.0603
     # A grasp is valid only while the cube is geometrically captured between the
     # two physical fingertip bodies; finger travel by itself is not sufficient.
@@ -151,6 +194,9 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     # Keep the fingers open during vertical descent, then permit closure only in
     # a small neighborhood around the calibrated grasp point.
     gripper_close_tolerance: float = 0.012
+    # Release the scripted descent at 12 mm so centering can take over, but do
+    # not move the jaws until the calibrated center is substantially tighter.
+    gripper_auto_close_tolerance: float = 0.006
     # The lower finger geometry touches the table when the jaw midpoint is put
     # exactly at the resting cube center.  Runtime contact isolation found a
     # 4.5 mm upward offset to be the collision-free physical grasp center.
@@ -168,8 +214,13 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     # The previous 25 g setting required near-static friction to lift and
     # amplified stick-slip impulses at the fingertips.
     object_mass: float = 0.020
-    object_x_range: tuple[float, float] = (-0.050, 0.050)
-    object_y_range: tuple[float, float] = (0.10, 0.13)
+    # GPU FK at the former inner corner (x=50 mm, y=100 mm) found a best
+    # vertical pre-grasp error of 13.13 mm with joint3/joint4 both saturated at
+    # -90 deg, so it could not satisfy the 12-mm phase gate.  The wider 25-mm
+    # box reached/grasped but saturated joint3 effort during lift.  This initial
+    # curriculum box is physically verified through held Lift at its boundary.
+    object_x_range: tuple[float, float] = (-0.010, 0.010)
+    object_y_range: tuple[float, float] = (0.128, 0.13)
     # Batched FK at the actual 47-mm place TCP height measured vertical
     # alignment 0.916 at radius 0.19 m (and 0.938 within the 8-mm inner side of
     # the goal tolerance).  At radius 0.23 m it fell to 0.847, which necessarily
@@ -185,7 +236,6 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     # cube bottom is still completely clear of the table and the held pose is
     # inside the measured sustainable workspace.
     lift_height: float = 0.015
-    reach_tolerance: float = 0.025
     # Place success is a physical release on the table, not merely passing near
     # the goal marker while still carrying the cube.
     place_tolerance: float = 0.020
@@ -213,10 +263,12 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     pregrasp_xy_tolerance: float = 0.012
     pregrasp_height_tolerance: float = 0.012
     pregrasp_vertical_alignment_threshold: float = 0.70
-    # XY alignment must dominate phase 0: replay showed Z within 6 mm while the
-    # gripper still stopped 52--58 mm beside the cube.
-    pregrasp_xy_cost_weight: float = 3.0
-    pregrasp_height_cost_weight: float = 1.0
+    # The policy now observes the actual phase-0 target, including its +55 mm
+    # clearance.  Keep XY important, but weight height strongly enough to avoid
+    # the measured failure where XY converged while joint3/joint4 drove the TCP
+    # 10--15 mm below the pre-grasp gate.
+    pregrasp_xy_cost_weight: float = 1.5
+    pregrasp_height_cost_weight: float = 2.5
     descent_xy_tolerance: float = 0.012
     # Do not enter the lower/place phase while merely passing near the marker.
     # Loaded PhysX replay settles 14.4 mm from the marker (the unloaded FK
@@ -232,10 +284,16 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
 
     # Pose shaping is a signed distance/attitude cost.  A positive exponential
     # reward at the pre-grasp boundary let the policy hover there indefinitely.
-    reach_reward_scale: float = 1.0
-    reach_progress_scale: float = 25.0
-    close_near_object_scale: float = 2.0
-    close_far_penalty_scale: float = 4.0
+    # The 1x audit settled around 21-mm XY / 23-mm height error because its
+    # target cost was only about -0.09 per step, comparable to secondary pose
+    # and smoothness terms.  Keep the cost signed (no hoverable positive
+    # exponential) but make exact phase-target tracking the dominant objective.
+    reach_reward_scale: float = 10.0
+    close_near_object_scale: float = 8.0
+    # This is a non-positive action-matching penalty.  It teaches open-far and
+    # close-near without paying the policy for hovering in either state.
+    close_command_reward_scale: float = 0.0
+    close_far_penalty_scale: float = 0.0
     grasp_phase_bonus_scale: float = 50.0
     pregrasp_phase_bonus_scale: float = 75.0
     grasp_hold_reward_scale: float = 2.0
@@ -248,7 +306,6 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     grasp_separation_tolerance: float = 0.014
     grasp_separation_penalty_scale: float = 250.0
     transport_reward_scale: float = 2.0
-    transport_progress_scale: float = 40.0
     place_reward_scale: float = 3.0
     release_reward_scale: float = 3.0
     # Paid during the physically gated terminal hold window.  The held-success
@@ -261,8 +318,11 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
     # unreachable even though the asset's physical range is +/-90 deg.
     joint_soft_limit_deg: float = 89.0
     joint_soft_limit_penalty_scale: float = 10.0
-    wrist_zero_penalty_scale: float = 2.0
-    vertical_alignment_reward_scale: float = 0.5
+    # Match the 10x Cartesian target scale.  Otherwise PPO improves position by
+    # sacrificing wrist-zero/downward approach, leaving wrist gate rates below
+    # 7% even when the three spatial gates exceed 67%.
+    wrist_zero_penalty_scale: float = 20.0
+    vertical_alignment_reward_scale: float = 5.0
     # Progress, phase completion and terminal success must dominate hovering.
     phase_progress_reward_scale: float = 50.0
     action_rate_penalty_scale: float = 0.008
@@ -434,7 +494,7 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
         ),
     )
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=2048,
+        num_envs=1024,
         env_spacing=0.8,
         replicate_physics=True,
     )
@@ -443,12 +503,17 @@ class DofbotPickPlaceEnvCfg(DirectRLEnvCfg):
 @configclass
 class DofbotPickPlaceReachEnvCfg(DofbotPickPlaceEnvCfg):
     curriculum_stage: str = "reach"
-    episode_length_s: float = 4.0
-    # Reach teaches the complete grasp prerequisite, but no lifting yet.
-    grasp_hold_reward_scale: float = 5.0
+    # Zero-pose -> safe, held pre-grasp above the cube.  Vertical descent and
+    # bilateral close deliberately begin only in Lift.
+    # Twelve seconds matches the conservative deterministic reference instead
+    # of forcing the policy to finish the whole sequence in 240 control steps.
+    episode_length_s: float = 12.0
+    grasp_hold_reward_scale: float = 0.0
 
 
 @configclass
 class DofbotPickPlaceLiftEnvCfg(DofbotPickPlaceEnvCfg):
     curriculum_stage: str = "lift"
-    episode_length_s: float = 6.0
+    # Lift episodes still reset every joint to zero and must repeat Reach before
+    # lifting, so their horizon must include both physical sequences.
+    episode_length_s: float = 22.0

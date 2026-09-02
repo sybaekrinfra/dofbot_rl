@@ -90,9 +90,9 @@ CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_reach_ik_direct_refine/<run>/
 ## DOFBOT_V2 Pick–Place 학습
 
 `assets/dofbot_v2/dofbot.usd`의 4축 arm, wrist, 물리 그리퍼를 사용하는 Direct-RL 환경이 포함되어 있습니다.
-정책 action은 `joint1~joint4 + Wrist_Twist`의 position delta 5개와 오른쪽 손가락 명령 1개로 총
+정책 action은 `joint1~joint4`의 누적 position delta 4개, 0° safety-hold wrist 슬롯 1개와 오른쪽 손가락 명령 1개로 총
 6차원입니다. 왼쪽 1번 손가락은 USD의 PhysX mimic 관계를 그대로 사용하므로 직접 명령하지 않습니다.
-정책 관측은 62차원이며 `reach → lift → pick_place` 순서로 체크포인트를 이어받습니다.
+정책 관측은 70차원이며 `reach → lift → pick_place` 순서로 체크포인트를 이어받습니다.
 
 사용자가 지정한 `Finger_Right_02` 로컬 점 `(0.00004, 0.020316, 0.019236) m`은 TCP 보정의
 원본 측정값입니다. 이 링크는 그리퍼가 닫힐 때 움직이므로, 런타임 정책은 이 점에서 보정한
@@ -106,17 +106,22 @@ CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_reach_ik_direct_refine/<run>/
 
 운반 중에는 action 변화량, 물체 각속도와 기울기에 penalty가 적용됩니다. 물체의 up-axis와
 각속도, 그리퍼 접근축, 현재 단계, 단계별 연속-hold 상태, 실제 양쪽 접촉력을 포함하므로
-최종 정책 관측은 62차원입니다.
+여기에 position target과 실제 joint 위치의 servo 오차 및 현재 phase가 실제로
+추적해야 하는 목표 오차를 포함하므로 최종 정책 관측은 70차원입니다.
 
 모든 episode는 `joint1, joint2, joint3, joint4, wrist, right finger = (0, 0, 0, 0, 0, 0)`에서
 시작합니다. arm/wrist 5축은 모두 `-90°~+90°`, 오른쪽 finger driver는 `-57°~+33°`이고
 음수가 열림, 양수가 닫힘입니다. reset은 0°를 유지하되 phase 0에서 driver를 `-0.50 rad`로
 열고, grasp/carry/release gate는 wrist가 0°±8° 안에 있을 때만 통과합니다. 왼쪽 finger는
 USD mimic 관계만 사용합니다. 이
-6-action/62-observation 환경은
-이전 4-action/35-observation, 6-action/39-observation 및 6-action/53-observation 모델과
+6-action/70-observation 환경은
+이전 4-action/35-observation, 6-action/39-observation, 6-action/53-observation 및
+6-action/62-observation, 6-action/65-observation 모델과
 호환되지 않으므로
 기존 Pick–Place 모델을 resume하지 말고 Reach 단계부터 새로 학습해야 합니다.
+
+커리큘럼에서 Reach는 1번의 안전한 pre-grasp 위치를 연속 유지하면 종료합니다. 큐브 쪽으로
+수직 하강하고 gripper를 닫는 동작은 Lift 단계에서 pre-grasp를 다시 수행한 뒤 시작합니다.
 
 단계 전환은 한 프레임 조건이 아닙니다. pre-grasp, grasp, lift, transport gate를 각각
 `4, 6, 8, 8` control step 연속 만족해야 다음 phase로 갑니다. Place pose는 위치·높이·선속도·각속도·
@@ -150,12 +155,12 @@ cd "$HOME/IsaacLab"
 
 ```bash
 cd "$HOME/dofbot_rl"
-NUM_ENVS=2048 PLAY_AFTER_EACH=1 bash cmd/end-to-end.sh
+NUM_ENVS=1024 PLAY_AFTER_EACH=1 bash cmd/end-to-end.sh
 ```
 
 기본 curriculum은 `1000 → 2000 → 4000` iteration을 추가하며 체크포인트 번호는 RSL-RL resume
 인덱스 규칙에 따라 `model_999.pt → model_2998.pt → model_6997.pt`가 됩니다. 환경 수는 시스템
-안전을 위해 모든 실행 스크립트에서 `1..2048`로 제한합니다.
+안전을 위해 모든 실행 스크립트에서 `1..1024`로 제한합니다.
 
 각 단계를 수동 실행하려면 아래 순서를 사용합니다. 기본 자동 검색은 이름이 정확히 `_reach`,
 `_lift`로 끝나는 canonical run만 허용합니다.
@@ -163,9 +168,9 @@ NUM_ENVS=2048 PLAY_AFTER_EACH=1 bash cmd/end-to-end.sh
 ```bash
 cd "$HOME/dofbot_rl"
 
-STAGE=reach NUM_ENVS=2048 MAX_ITERATIONS=1000 bash cmd/train_pick_place.sh
-STAGE=lift NUM_ENVS=2048 MAX_ITERATIONS=2000 bash cmd/train_pick_place.sh
-STAGE=pick_place NUM_ENVS=2048 MAX_ITERATIONS=4000 bash cmd/train_pick_place.sh
+STAGE=reach NUM_ENVS=1024 MAX_ITERATIONS=1000 bash cmd/train_pick_place.sh
+STAGE=lift NUM_ENVS=1024 MAX_ITERATIONS=2000 bash cmd/train_pick_place.sh
+STAGE=pick_place NUM_ENVS=1024 MAX_ITERATIONS=4000 bash cmd/train_pick_place.sh
 ```
 
 환경·보상·관측이 변경됐으므로 현재는 반드시 `RESUME=0`인 새 Reach부터 시작해야 합니다.
@@ -184,19 +189,19 @@ CHECKPOINT_PATH="$HOME/IsaacLab/logs/rsl_rl/dofbot_v2_pick_place/<run>/<model>.p
 
 ### 관측
 
-62차원 관측은 아래 항목으로 구성됩니다.
+70차원 관측은 아래 항목으로 구성됩니다.
 
-- arm/wrist position·velocity 10개와 finger position·velocity 4개
+- arm/wrist position·velocity 10개, joint target servo 오차 5개, finger position·velocity 4개
 - base_link 기준 gripper/object/goal position 9개
 - grasp/goal delta 6개와 object 선속도 3개
-- gripper command 1개와 previous action 6개
+- gripper command 1개, previous action 6개, 현재 phase target 오차 3개
 - grasp 접근축 3개, phase one-hot 5개, object up-axis·각속도 6개
 - phase/place/success hold, release authorization, grasp-loss 상태 5개
 - reset 위치 대비 cube XY 변위 2개와 실제 좌·우 fingertip 접촉력 2개
 
 ### 행동
 
-- `joint1~joint4 + wrist` position increment 5개
+- `joint1~joint4` 누적 position increment 4개와 0° safety-hold wrist 슬롯 1개
 - 오른쪽 finger 열기/닫기 명령 1개
 
 ### 보상

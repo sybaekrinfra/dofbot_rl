@@ -52,7 +52,10 @@ class DofbotPickPlacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 100
     experiment_name = "dofbot_v2_pick_place"
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.8,
+        # Measured-position-relative actions no longer accumulate exploration
+        # into a random walk, so moderate noise is sufficient and permits the
+        # four-frame precision gates to be held.
+        init_noise_std=0.6,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[256, 256, 128],
@@ -63,15 +66,15 @@ class DofbotPickPlacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        # 2048 parallel environments already provide broad exploration.  A
-        # smaller entropy bonus lets Reach converge to millimetre-scale XY/Z.
-        entropy_coef=0.001,
+        entropy_coef=0.002,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         # Do not let low early-stage KL inflate 3e-4 to rsl_rl's 1e-2 cap.
         schedule="fixed",
-        gamma=0.99,
+        # The verified low-impact sequence spans substantially more than the
+        # old 4--8 second episodes; preserve phase bonuses across that horizon.
+        gamma=0.995,
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,

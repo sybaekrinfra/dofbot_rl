@@ -99,6 +99,7 @@ from dofbot_rl.tasks import PICK_PLACE_ENV_ID, PICK_PLACE_LIFT_ENV_ID
 from dofbot_rl.tasks.dofbot_pick_place_cfg import (
     DofbotPickPlaceEnvCfg,
     DofbotPickPlaceLiftEnvCfg,
+    DofbotPickPlaceReachEnvCfg,
 )
 
 
@@ -117,6 +118,15 @@ def _log_value(info: dict, name: str) -> float:
 
 
 def main() -> None:
+    training_cfgs = {
+        "REACH": DofbotPickPlaceReachEnvCfg(),
+        "LIFT": DofbotPickPlaceLiftEnvCfg(),
+        "PICK_PLACE": DofbotPickPlaceEnvCfg(),
+    }
+    training_horizon_steps = {
+        name: int(round(stage_cfg.episode_length_s / (stage_cfg.sim.dt * stage_cfg.decimation)))
+        for name, stage_cfg in training_cfgs.items()
+    }
     cfg = DofbotPickPlaceEnvCfg() if args_cli.full_pick_place else DofbotPickPlaceLiftEnvCfg()
     env_id = PICK_PLACE_ENV_ID if args_cli.full_pick_place else PICK_PLACE_LIFT_ENV_ID
     cfg.seed = 42
@@ -393,7 +403,13 @@ def main() -> None:
             )
         ).squeeze(-1)
         desired_q = u.robot.data.joint_pos.torch[:, arm_ids] + delta_q
-        desired_q[:, 0] = torch.clamp(desired_q[:, 0], -0.0873, 0.0873)
+        # joint1 is the workspace yaw axis and has the same +/-90 degree range
+        # as the other arm joints.  The old +/-5 degree clamp made most of the
+        # training distribution unreachable to this supposedly authoritative
+        # deterministic check.
+        desired_q[:, 0] = torch.clamp(
+            desired_q[:, 0], u._controlled_lower[0], u._controlled_upper[0]
+        )
         desired_q = torch.clamp(
             desired_q, u._controlled_lower[:4], u._controlled_upper[:4]
         )
@@ -475,6 +491,24 @@ def main() -> None:
         grasp_target[:, 2] += u.cfg.grasp_center_height_offset
         pregrasp_target = grasp_target.clone()
         pregrasp_target[:, 2] += u.cfg.pregrasp_height
+        object_from_base = object_target - u._base_pos_w()
+        object_yaw = -torch.atan2(object_from_base[:, 0], object_from_base[:, 1])
+        object_radius = torch.linalg.norm(object_from_base[:, :2], dim=-1)
+        local_pregrasp_joint_target = pregrasp_joint_target.clone()
+        local_pregrasp_joint_target[:, 0] += object_yaw
+        # Interpolate the two planar joints between the nominal 130-mm seed and
+        # the independently FK-verified 127.48-mm boundary seed.  This keeps
+        # the deterministic oracle representative of the randomized box.
+        radial_delta = object_radius - 0.13
+        local_pregrasp_joint_target[:, 1] += -23.0 * radial_delta
+        local_pregrasp_joint_target[:, 2] += 17.7 * radial_delta
+        local_pregrasp_joint_target = torch.clamp(
+            local_pregrasp_joint_target,
+            u._controlled_lower[:4],
+            u._controlled_upper[:4],
+        )
+        local_grasp_joint_target = grasp_joint_target.clone()
+        local_grasp_joint_target[:, 0] += object_yaw
         print(
             f"[SANITY] fixed_object={initial_object_pos[0].tolist()} "
             f"arm_ids={arm_ids}",
@@ -485,7 +519,9 @@ def main() -> None:
         stagnant_steps = 0
         pregrasp_passed = False
         for local_step in range(420):
-            action = joint_action(pregrasp_joint_target, -1.0, max_action=0.12)
+            action = joint_action(
+                local_pregrasp_joint_target, -1.0, max_action=0.12
+            )
             step(action, "PREGRASP", local_step)
             grasp_pos = u._gripper_center_w()
             error = _value(torch.linalg.norm(pregrasp_target - grasp_pos, dim=-1))
@@ -538,7 +574,7 @@ def main() -> None:
 
         descent_passed = False
         for local_step in range(360):
-            action = joint_action(grasp_joint_target, -1.0, max_action=0.08)
+            action = joint_action(local_grasp_joint_target, -1.0, max_action=0.08)
             step(action, "DESCEND", local_step)
             # The high pregrasp pose cannot kinematically reach the stricter
             # close orientation.  Enforce the achievable high-pose threshold
@@ -578,7 +614,7 @@ def main() -> None:
             raise SanityFailure("DESCENT_TARGET_NOT_REACHED")
 
         # The coarse FK waypoint intentionally stops outside contact.  Center
-        # the *open* jaw in XY before issuing any close command.  Runtime
+        # the jaw in XY before the environment's ordered auto-close.  Runtime
         # contact isolation showed that placing the jaw midpoint exactly at the
         # resting cube center makes the lower finger geometry hit the table.
         # Keep the empirically collision-free jaw center 4.5 mm above the cube.
@@ -606,7 +642,12 @@ def main() -> None:
                     f"CUBE_DISTURBED_DURING_FINE_CENTER "
                     f"drift={1000.0 * object_drift:.2f}mm"
                 )
-            if center_distance < 0.0020 and center_xy < 0.0015:
+            # Runtime begins closing at this same distance.  Requiring an even
+            # tighter open-jaw pose makes the check fight the controller.
+            if (
+                center_distance <= u.cfg.gripper_auto_close_tolerance
+                and center_xy <= 0.003
+            ):
                 fine_center_passed = True
                 print(
                     f"[SANITY:PASS] FINE_CENTER "
@@ -664,6 +705,23 @@ def main() -> None:
                 break
         if not close_passed:
             raise SanityFailure("BILATERAL_GRASP_NOT_ESTABLISHED")
+
+        # A Reach training episode must have enough time to establish the same
+        # bilateral grasp and then satisfy its held-success window.  The sanity
+        # environment itself uses 60 seconds so this explicitly audits the
+        # configured training horizon instead of silently hiding a short one.
+        reach_required_steps = completed_steps + u.cfg.success_hold_steps
+        reach_budget_steps = training_horizon_steps["REACH"]
+        print(
+            f"[SANITY:HORIZON] REACH required={reach_required_steps} "
+            f"budget={reach_budget_steps}",
+            flush=True,
+        )
+        if reach_required_steps > reach_budget_steps:
+            raise SanityFailure(
+                "REACH_TRAINING_HORIZON_TOO_SHORT "
+                f"required={reach_required_steps} budget={reach_budget_steps}"
+            )
 
         # Lift from the *captured* pose along a jerk-free vertical Cartesian
         # path.  A direct jump toward a remote joint-space seed created an
@@ -764,6 +822,21 @@ def main() -> None:
 
         if args_cli.full_pick_place and not lift_passed:
             raise SanityFailure("LIFT_PHASE3_NOT_REACHED")
+
+        lift_required_steps = completed_steps + (
+            u.cfg.success_hold_steps if args_cli.full_pick_place else 0
+        )
+        lift_budget_steps = training_horizon_steps["LIFT"]
+        print(
+            f"[SANITY:HORIZON] LIFT required={lift_required_steps} "
+            f"budget={lift_budget_steps}",
+            flush=True,
+        )
+        if lift_required_steps > lift_budget_steps:
+            raise SanityFailure(
+                "LIFT_TRAINING_HORIZON_TOO_SHORT "
+                f"required={lift_required_steps} budget={lift_budget_steps}"
+            )
 
         if not args_cli.full_pick_place:
             print(
@@ -1038,6 +1111,18 @@ def main() -> None:
                 "RELEASE_IMPACT_TOO_LARGE "
                 f"max_omega={max_release_ang_speed:.3f}rad/s "
                 f"max_speed={max_release_lin_speed:.3f}m/s"
+            )
+
+        pick_place_budget_steps = training_horizon_steps["PICK_PLACE"]
+        print(
+            f"[SANITY:HORIZON] PICK_PLACE required={completed_steps} "
+            f"budget={pick_place_budget_steps}",
+            flush=True,
+        )
+        if completed_steps > pick_place_budget_steps:
+            raise SanityFailure(
+                "PICK_PLACE_TRAINING_HORIZON_TOO_SHORT "
+                f"required={completed_steps} budget={pick_place_budget_steps}"
             )
 
         print(

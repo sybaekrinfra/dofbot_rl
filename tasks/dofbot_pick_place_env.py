@@ -121,6 +121,12 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         self._phase_gate_hold_count = torch.zeros(
             (self.num_envs,), dtype=torch.long, device=self.device
         )
+        self._transport_waypoint_index = torch.zeros(
+            (self.num_envs,), dtype=torch.long, device=self.device
+        )
+        self._transport_waypoint_steps = torch.zeros(
+            (self.num_envs,), dtype=torch.long, device=self.device
+        )
         self._phase_transition_hold_steps = torch.tensor(
             self.cfg.phase_transition_hold_steps, dtype=torch.long, device=self.device
         )
@@ -248,27 +254,159 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             (self._task_phase == 1)
             & (grasp_dist <= self.cfg.gripper_close_tolerance)
         )
+        auto_close_allowed = (
+            (self._task_phase == 1)
+            & (grasp_dist <= self.cfg.gripper_auto_close_tolerance)
+        )
+        # Crossing the 6 mm gate starts an ordered close sequence.  Latch it
+        # for the rest of phase 1 so contact reaction cannot reopen the jaw on
+        # the next frame merely because the TCP moved a fraction outward.
+        ordered_close = auto_close_allowed | (
+            (self._task_phase == 1) & (self._gripper_command > 0.5)
+        )
         # Action -1 opens and +1 closes.  Keep the jaw open during approach and
         # descent, enable the learned close action only at the calibrated grasp
         # point, and keep positive force after a physical capture.
         self._gripper_command = torch.where(
-            (self._task_phase == 0)
-            | ((self._task_phase == 1) & ~close_allowed),
+            (self.cfg.curriculum_stage == "reach")
+            | (self._task_phase == 0)
+            | ((self._task_phase == 1) & ~ordered_close),
             torch.zeros_like(smoothed_command),
             torch.where(
-                (self._task_phase == 2)
+                ordered_close
+                | (self._task_phase == 2)
                 | (self._task_phase == 3)
                 | ((self._task_phase == 4) & ~release_control_allowed),
                 torch.ones_like(smoothed_command),
                 smoothed_command,
             ),
         )
-        controlled_targets = self._joint_targets[:, self._controlled_joint_ids]
-        arm_delta = self.actions[:, :5] * self._joint_action_scales
-        controlled_targets = controlled_targets + arm_delta
-        self._joint_targets[:, self._controlled_joint_ids] = torch.clamp(
-            controlled_targets, self._controlled_lower, self._controlled_upper
+        # Incremental targets are effective for the four positioning joints;
+        # their accumulated command is observable through joint_target_error.
+        arm_targets = self._joint_targets[:, self._arm_joint_ids]
+        normal_delta = self.actions[:, :4] * self._joint_action_scales[:4]
+
+        # Phase 1 is an ordered, safety-critical vertical descent.  A pure PPO
+        # continuation inherited Reach's hold-above behavior and stayed 70--80
+        # mm from the grasp point for thousands of iterations.  Follow the
+        # verified negative-joint3 seed at a bounded rate and retain a small
+        # policy residual for contact/model correction.
+        object_from_base = self.object.data.root_pos_w.torch - self._base_pos_w()
+        object_yaw = -torch.atan2(object_from_base[:, 0], object_from_base[:, 1])
+        grasp_seed = torch.tensor(
+            self.cfg.phase1_grasp_joint_seed_rad,
+            dtype=arm_targets.dtype,
+            device=self.device,
+        ).unsqueeze(0).expand(self.num_envs, -1).clone()
+        grasp_seed[:, 0] += object_yaw
+        grasp_seed = torch.clamp(
+            grasp_seed, self._controlled_lower[:4], self._controlled_upper[:4]
         )
+        scripted_delta = torch.clamp(
+            grasp_seed - arm_targets,
+            min=-self.cfg.phase1_descent_step_rad,
+            max=self.cfg.phase1_descent_step_rad,
+        )
+        residual_delta = (
+            self.actions[:, :4] * self.cfg.phase1_residual_action_scale_rad
+        )
+        phase1_delta = scripted_delta + residual_delta
+        # Do not hand control back in the 12 mm -> 6 mm dead band.  The old
+        # split stopped the safe descent before the ordered auto-close gate,
+        # allowing PPO to learn to hover indefinitely.  Keep following the
+        # vertical seed until auto-close actually becomes active.
+        scripted_descent_active = (self._task_phase == 1) & ~ordered_close
+        arm_delta = torch.where(
+            scripted_descent_active.unsqueeze(-1), phase1_delta, normal_delta
+        )
+
+        # Phase 3 follows the same collision-free waypoint chain that passes
+        # the deterministic full PickPlace test.  The failed PPO run reached
+        # phase 3 in 84% of samples but satisfied goal XY in only 0.092%, then
+        # catastrophically forgot Lift.  Preserve the grasp and make transport
+        # an ordered motion with a bounded learned residual.
+        transport_waypoints = torch.tensor(
+            self.cfg.phase3_transport_joint_waypoints_rad,
+            dtype=arm_targets.dtype,
+            device=self.device,
+        )
+        waypoint_count = transport_waypoints.shape[0]
+        waypoint_index = torch.clamp(
+            self._transport_waypoint_index, min=0, max=waypoint_count - 1
+        )
+        transport_target = transport_waypoints[waypoint_index].clone()
+        goal_from_base = self._goal_pos_w - self._base_pos_w()
+        goal_yaw = -torch.atan2(goal_from_base[:, 0], goal_from_base[:, 1])
+        transport_target[:, 0] += goal_yaw
+        transport_target = torch.clamp(
+            transport_target, self._controlled_lower[:4], self._controlled_upper[:4]
+        )
+        # Use the same fixed-duration segments as the verified deterministic
+        # path.  Under load joint3 retains about 0.037 rad of servo error, so a
+        # measured-error gate deadlocked indefinitely at waypoint zero.
+        phase3_active = (
+            (self.cfg.curriculum_stage == "pick_place") & (self._task_phase == 3)
+        )
+        self._transport_waypoint_steps = torch.where(
+            phase3_active,
+            self._transport_waypoint_steps + 1,
+            self._transport_waypoint_steps,
+        )
+        advance_waypoint = (
+            phase3_active
+            & (self._transport_waypoint_steps >= self.cfg.phase3_waypoint_steps)
+            & (self._transport_waypoint_index < waypoint_count - 1)
+        )
+        self._transport_waypoint_index = torch.where(
+            advance_waypoint,
+            self._transport_waypoint_index + 1,
+            self._transport_waypoint_index,
+        )
+        self._transport_waypoint_steps = torch.where(
+            advance_waypoint,
+            torch.zeros_like(self._transport_waypoint_steps),
+            self._transport_waypoint_steps,
+        )
+        transport_delta = torch.clamp(
+            transport_target - arm_targets,
+            min=-self.cfg.phase3_transport_step_rad,
+            max=self.cfg.phase3_transport_step_rad,
+        )
+        transport_delta += (
+            self.actions[:, :4] * self.cfg.phase3_residual_action_scale_rad
+        )
+        arm_delta = torch.where(phase3_active.unsqueeze(-1), transport_delta, arm_delta)
+
+        # Phase 4 is a slow vertical place motion.  Hold this physical pose
+        # until the existing position/velocity hold gate authorizes release.
+        lower_target = torch.tensor(
+            self.cfg.phase4_lower_joint_seed_rad,
+            dtype=arm_targets.dtype,
+            device=self.device,
+        ).unsqueeze(0).expand(self.num_envs, -1).clone()
+        lower_target[:, 0] += goal_yaw
+        lower_target = torch.clamp(
+            lower_target, self._controlled_lower[:4], self._controlled_upper[:4]
+        )
+        lower_delta = torch.clamp(
+            lower_target - arm_targets,
+            min=-self.cfg.phase4_lower_step_rad,
+            max=self.cfg.phase4_lower_step_rad,
+        )
+        lower_delta += self.actions[:, :4] * self.cfg.phase4_residual_action_scale_rad
+        phase4_active = (
+            (self.cfg.curriculum_stage == "pick_place") & (self._task_phase == 4)
+        )
+        arm_delta = torch.where(phase4_active.unsqueeze(-1), lower_delta, arm_delta)
+        arm_targets = arm_targets + arm_delta
+        self._joint_targets[:, self._arm_joint_ids] = torch.clamp(
+            arm_targets, self._controlled_lower[:4], self._controlled_upper[:4]
+        )
+        # Every valid Reach/Grasp/Lift/Place gate requires the twist wrist at
+        # zero.  Letting PPO noise integrate this unused DOF produced a random
+        # walk and made wrist-zero the sole bottleneck.  Enforce the physical
+        # grasp safety posture instead of asking exploration to rediscover it.
+        self._joint_targets[:, self._wrist_joint_id] = 0.0
 
     def _apply_action(self) -> None:
         controlled_targets = self._joint_targets[:, self._controlled_joint_ids]
@@ -379,8 +517,11 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         return quat_apply(body_quat, local_z)
 
     def _vertical_alignment(self) -> torch.Tensor:
-        # Axis sign is irrelevant: both +Z and -Z normal to the table are vertical.
-        return torch.abs(self._grasp_approach_axis_w()[:, 2])
+        # Sign matters: only the downward approach is a valid grasp. abs() let
+        # the wrist point at the ceiling and still pass every alignment gate,
+        # which also flips the sign of the calibrated offset in
+        # _gripper_center_w() and stalls pregrasp height ~2x that offset.
+        return -self._grasp_approach_axis_w()[:, 2]
 
     def _wrist_zero_mask(self) -> torch.Tensor:
         """Return wrists inside the explicit zero-twist grasp tolerance."""
@@ -402,6 +543,51 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         object_height = object_pos[:, 2] - (self.cfg.table_top_z + 0.5 * self.cfg.object_size)
         object_speed = torch.linalg.norm(self.object.data.root_lin_vel_w.torch, dim=-1)
         return gripper_pos, object_pos, goal_pos, reach_dist, goal_dist, object_height, object_speed
+
+    def _active_task_target_error_w(
+        self,
+        gripper_pos: torch.Tensor,
+        object_pos: torch.Tensor,
+        goal_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the error to the target that owns the current task phase.
+
+        The previous observation always exposed the final grasp-center error.
+        During phase 0 that contradicted the reward and transition gate, whose
+        true target is 55 mm higher.  This explicit phase target keeps the MDP
+        observation consistent with the deterministic manipulation sequence.
+        """
+
+        grasp_target = self._grasp_target_w()
+        pregrasp_target = grasp_target.clone()
+        pregrasp_target[:, 2] += self.cfg.pregrasp_height
+        gripper_lift_target = object_pos.clone()
+        gripper_lift_target[:, 2] = (
+            self._object_initial_pos_w[:, 2]
+            + self.cfg.grasp_center_height_offset
+            + self.cfg.lift_height
+        )
+        goal_above_target = goal_pos.clone()
+        goal_above_target[:, 2] += self.cfg.transport_clearance
+
+        phase = self._task_phase.unsqueeze(-1)
+        return torch.where(
+            (phase == 0) | (self.cfg.curriculum_stage == "reach"),
+            pregrasp_target - gripper_pos,
+            torch.where(
+                phase == 1,
+                grasp_target - gripper_pos,
+                torch.where(
+                    phase == 2,
+                    gripper_lift_target - gripper_pos,
+                    torch.where(
+                        phase == 3,
+                        goal_above_target - object_pos,
+                        goal_pos - object_pos,
+                    ),
+                ),
+            ),
+        )
 
     def _place_spatial_mask(self) -> torch.Tensor:
         """Return cubes inside the final goal volume, independent of velocity."""
@@ -468,6 +654,11 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         base_pos = self._base_pos_w()
         controlled_pos = self.robot.data.joint_pos[:, self._controlled_joint_ids]
         controlled_vel = self.robot.data.joint_vel[:, self._controlled_joint_ids]
+        # Expose servo tracking error so the policy can distinguish a settled
+        # pose from one whose actuator is still chasing the bounded offset.
+        joint_target_error = (
+            self._joint_targets[:, self._controlled_joint_ids] - controlled_pos
+        )
         finger_pos = self.robot.data.joint_pos[:, self._finger_observation_joint_ids]
         finger_vel = self.robot.data.joint_vel[:, self._finger_observation_joint_ids]
         object_vel = self.object.data.root_lin_vel_w.torch
@@ -515,11 +706,15 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         normalized_contact_forces = torch.stack(
             (left_contact_force, right_contact_force), dim=-1
         ) / max(self.cfg.finger_contact_force_threshold, 1.0e-6)
+        active_target_error = self._active_task_target_error_w(
+            gripper_pos, object_pos, goal_pos
+        )
 
         obs = torch.cat(
             (
                 controlled_pos,
                 controlled_vel,
+                joint_target_error,
                 finger_pos,
                 finger_vel,
                 gripper_pos - base_pos,
@@ -530,6 +725,7 @@ class DofbotPickPlaceEnv(DirectRLEnv):
                 object_vel,
                 self._gripper_command.unsqueeze(-1),
                 self._previous_actions,
+                active_target_error,
                 approach_axis,
                 phase_one_hot,
                 object_up,
@@ -561,11 +757,26 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         )
         wrist_zero_ok = self._wrist_zero_mask()
         if self.cfg.curriculum_stage == "reach":
+            gripper_pos = self._gripper_center_w()
+            object_pos = self.object.data.root_pos_w.torch
+            pregrasp_target = self._grasp_target_w()
+            pregrasp_target[:, 2] += self.cfg.pregrasp_height
             return (
-                (self._task_phase >= 2)
-                & gripper_physically_closed
-                & (reach_dist < 1.25 * self.cfg.gripper_capture_tolerance)
-                & (self._vertical_alignment() > self.cfg.vertical_alignment_threshold)
+                (self._task_phase >= 1)
+                & (
+                    torch.linalg.norm(
+                        gripper_pos[:, :2] - object_pos[:, :2], dim=-1
+                    )
+                    < self.cfg.pregrasp_xy_tolerance
+                )
+                & (
+                    torch.abs(gripper_pos[:, 2] - pregrasp_target[:, 2])
+                    < self.cfg.pregrasp_height_tolerance
+                )
+                & (
+                    self._vertical_alignment()
+                    > self.cfg.pregrasp_vertical_alignment_threshold
+                )
                 & wrist_zero_ok
             )
         if self.cfg.curriculum_stage == "lift":
@@ -614,14 +825,15 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         )
         wrist_zero_ok = self._wrist_zero_mask()
         phase_gate_ready = (phase == 0) & pregrasp_ready
-        phase_gate_ready |= (
-            (phase == 1)
-            & (grasp_dist < self.cfg.gripper_capture_tolerance)
-            & (self._gripper_command > 0.65)
-            & gripper_physically_closed
-            & (vertical_alignment > self.cfg.vertical_alignment_threshold)
-            & wrist_zero_ok
-        )
+        if self.cfg.curriculum_stage != "reach":
+            phase_gate_ready |= (
+                (phase == 1)
+                & (grasp_dist < self.cfg.gripper_capture_tolerance)
+                & (self._gripper_command > 0.65)
+                & gripper_physically_closed
+                & (vertical_alignment > self.cfg.vertical_alignment_threshold)
+                & wrist_zero_ok
+            )
         if self.cfg.curriculum_stage != "reach":
             phase_gate_ready |= (
                 (phase == 2)
@@ -749,8 +961,14 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         # phase and caches this event so both calculations observe one state.
         phase_changed = self._phase_changed
         phase = self._task_phase
-        phase0 = (phase == 0).float()
-        phase1 = (phase == 1).float()
+        if self.cfg.curriculum_stage == "reach":
+            # Phase 1 means the held pre-grasp gate was reached.  Maintain the
+            # same safe target until terminal success; descent starts in Lift.
+            phase0 = (phase <= 1).float()
+            phase1 = torch.zeros_like(phase0)
+        else:
+            phase0 = (phase == 0).float()
+            phase1 = (phase == 1).float()
         phase2 = (phase == 2).float()
         phase3 = (phase == 3).float()
         phase4 = (phase == 4).float()
@@ -810,12 +1028,11 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             * close_progress
             * torch.exp(-reach_dist / 0.010)
         )
-        close_far = (
-            -phase1
-            * (1.0 - close_ready)
-            * self.cfg.close_far_penalty_scale
-            * close_command
-        )
+        # Closure is an ordered safety action once the 12-mm gate is reached,
+        # so the environment performs it directly.  PPO retains finger control
+        # for final release but receives no contradictory phase-1 action loss.
+        close_command_reward = torch.zeros_like(reach_dist)
+        close_far = torch.zeros_like(reach_dist)
 
         # Lift vertically from the cube's current XY instead of pulling the
         # gripper back toward the sampled XY if contact shifts the cube slightly.
@@ -914,7 +1131,7 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         )
 
         phase_distance = torch.where(
-            phase == 0,
+            (phase == 0) | (self.cfg.curriculum_stage == "reach"),
             pregrasp_dist,
             torch.where(
                 phase == 1,
@@ -948,6 +1165,7 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             + grasp_reward
             + alignment_reward
             + close_near
+            + close_command_reward
             + close_far
             + lift_reward
             + lift_progress
@@ -1361,6 +1579,7 @@ class DofbotPickPlaceEnv(DirectRLEnv):
             "Reward/approach": approach_reward.mean(),
             "Reward/grasp": grasp_reward.mean(),
             "Reward/gripper_close_progress": close_near.mean(),
+            "Reward/gripper_close_command": close_command_reward.mean(),
             "Reward/grasp_phase_bonus": grasp_phase_bonus.mean(),
             "Reward/pregrasp_phase_bonus": pregrasp_phase_bonus.mean(),
             "Reward/alignment": alignment_reward.mean(),
@@ -1559,6 +1778,8 @@ class DofbotPickPlaceEnv(DirectRLEnv):
         self._place_pose_hold_count[env_ids] = 0
         self._place_release_authorized[env_ids] = False
         self._phase_gate_hold_count[env_ids] = 0
+        self._transport_waypoint_index[env_ids] = 0
+        self._transport_waypoint_steps[env_ids] = 0
         self._task_phase[env_ids] = 0
         self._grasp_loss_steps[env_ids] = 0
         self._pregrasp_completed[env_ids] = False

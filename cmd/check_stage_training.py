@@ -91,7 +91,13 @@ def main() -> None:
     success = tail_mean(accumulator, "Metrics/success_rate", args.window)
     held_peak = tail_max(accumulator, "Conditions/success_held", args.window)
     task_failed = tail_mean(accumulator, "Metrics/task_failed", args.window)
-    checks = [held_peak > 0.0, task_failed < 0.75]
+    # DirectRLEnv auto-resets a terminal environment before the reward/log
+    # dictionary is collected.  Consequently the exact step that reaches the
+    # configured success_hold_steps can be absent from Conditions/success_held
+    # even though termination was correctly gated by that counter.  Treat the
+    # tag as diagnostic and validate the stage through its persistent physical
+    # conditions and success rate below.
+    checks = [task_failed < 0.75]
     details = [
         f"success={success:.4f}",
         f"held_peak={held_peak:.4f}",
@@ -99,10 +105,10 @@ def main() -> None:
     ]
 
     if args.stage == "reach":
-        capture = tail_mean(accumulator, "Metrics/object_between_fingertips", args.window)
-        grasped = tail_mean(accumulator, "Metrics/grasp_ever_completed", args.window)
-        checks.extend((success >= 0.02, capture >= 0.02, grasped >= 0.02))
-        details.extend((f"capture={capture:.4f}", f"grasped={grasped:.4f}"))
+        pregrasp = tail_mean(accumulator, "Metrics/pregrasp_ready", args.window)
+        phase1 = tail_mean(accumulator, "Phase/phase1_rate", args.window)
+        checks.extend((success >= 0.02, pregrasp >= 0.02, phase1 >= 0.02))
+        details.extend((f"pregrasp={pregrasp:.4f}", f"phase1={phase1:.4f}"))
     elif args.stage == "lift":
         lift = tail_mean(accumulator, "Metrics/lift_rate", args.window)
         maintained = tail_mean(accumulator, "Metrics/grasp_maintained", args.window)

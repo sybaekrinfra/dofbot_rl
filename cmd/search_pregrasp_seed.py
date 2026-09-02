@@ -96,9 +96,14 @@ def main() -> None:
                 (u.num_envs, 4), generator=generator, device=u.device
             )
             samples = torch.clamp(samples, lower, upper)
-        # Symmetric target x=0 strongly favors joint1 near zero.  Retain some
-        # exploration while spending most samples on the arm's planar joints.
-        samples[:, 0] *= 0.35
+        # joint1 is the workspace yaw axis.  Center its samples on the target
+        # azimuth; shrinking them around zero made every non-zero object_x
+        # query misleadingly look unreachable.
+        target_yaw = -torch.atan2(target_local[0], target_local[1])
+        if iteration < 8 or best_cost == float("inf"):
+            samples[:, 0] = torch.clamp(
+                target_yaw + 0.35 * samples[:, 0], lower[0], upper[0]
+            )
 
         joint_pos[:, u._arm_joint_ids] = samples
         joint_pos[:, u._wrist_joint_id] = 0.0
