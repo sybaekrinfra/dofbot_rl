@@ -1,0 +1,1 @@
+ros2 run topic_tools relay /isaac_dofbot/joint_states /dofbot/joint_command
