@@ -381,3 +381,60 @@ ros2 run bottle_position bottle_position_node
 - 검출은 color 기준, 위치 계산은 depth 기준이므로 두 영상의 정렬 상태가 중요합니다.
 - TF 변환이 맞지 않으면 `bottle_position`은 좌표를 publish하지 못할 수 있습니다.
 - `Dockerfile.dofbot`만으로 Orbbec 드라이버까지 자동 설치되는 구조는 아니므로, 카메라 쪽은 별도 환경 준비가 필요합니다.
+
+## `train_result` 실행 스크립트
+
+`train_result` 폴더에 포함된 단계별 학습 결과(`reach`, `lift`, `pick_place`)를 바로 실행하는 명령입니다.
+Isaac Lab은 `$HOME/IsaacLab`, 이 저장소는 `$HOME/dofbot_rl`에 있다고 가정합니다.
+
+| 단계 | Task | 최종 체크포인트 | 중간 체크포인트 |
+| --- | --- | --- | --- |
+| reach | `Dofbot-V2-PickPlace-Reach-Direct-v0` | `train_result/reach/model_999.pt` | `model_500.pt` |
+| lift | `Dofbot-V2-PickPlace-Lift-Direct-v0` | `train_result/lift/model_2998.pt` | `model_1500.pt`, `model_2100.pt`, `model_2600.pt` |
+| pick_place | `Dofbot-V2-PickPlace-Direct-v0` | `train_result/pick_place/model_4997.pt` | `model_3500.pt`, `model_4100.pt`, `model_4700.pt` |
+
+### Reach
+
+```bash
+cd "$HOME/dofbot_rl"
+TASK="Dofbot-V2-PickPlace-Reach-Direct-v0" \
+CHECKPOINT_PATH="$HOME/dofbot_rl/train_result/reach/model_999.pt" \
+VIZ_MODE=kit \
+bash cmd/play_pick_place.sh --debug_interval 30
+```
+
+### Lift
+
+```bash
+cd "$HOME/dofbot_rl"
+TASK="Dofbot-V2-PickPlace-Lift-Direct-v0" \
+CHECKPOINT_PATH="$HOME/dofbot_rl/train_result/lift/model_2998.pt" \
+VIZ_MODE=kit \
+bash cmd/play_pick_place.sh --debug_interval 30
+```
+
+### Pick Place
+
+```bash
+cd "$HOME/dofbot_rl"
+TASK="Dofbot-V2-PickPlace-Direct-v0" \
+CHECKPOINT_PATH="$HOME/dofbot_rl/train_result/pick_place/model_4997.pt" \
+VIZ_MODE=kit \
+bash cmd/play_pick_place.sh --debug_interval 30
+```
+
+### 옵션
+
+- 중간 체크포인트를 보려면 `CHECKPOINT_PATH`의 파일명을 위 표의 중간 체크포인트로 바꿉니다.
+- GUI 없이 실행하려면 `VIZ_MODE=none`을 사용하고, `--max_steps 1000`처럼 종료 step을 지정합니다.
+- 실시간 속도로 재생하려면 `--real-time`을 추가합니다.
+- `--debug_interval N`은 N step마다 grasp phase, 거리, finger 위치를 출력합니다. `0`이면 출력하지 않습니다.
+
+### TensorBoard로 학습 곡선 확인
+
+```bash
+cd "$HOME/dofbot_rl"
+tensorboard --logdir train_result
+```
+
+`reach`, `lift`, `pick_place`가 각각 별도 run으로 표시됩니다. 브라우저에서 `http://localhost:6006`을 엽니다.
